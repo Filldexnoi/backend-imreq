@@ -68,6 +68,27 @@ class AnalyzedRequirement(AnalyzedRequirementBase):
     class Config:
         from_attributes = True
 
+# Suggested Requirement Schemas
+class SuggestedRequirementBase(BaseModel):
+    req_id: str
+    module: str
+    original_requirement: str
+    suggested_requirement: str
+    original_score: Optional[str] = None
+    improvements: Optional[Dict[str, str]] = None  # What was fixed for each criterion
+
+class SuggestedRequirementCreate(SuggestedRequirementBase):
+    project_id: UUID
+
+class SuggestedRequirement(SuggestedRequirementBase):
+    id: UUID
+    project_id: UUID
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+        
 # Column Mapping Schema
 class ColumnMapping(BaseModel):
     req_id: str

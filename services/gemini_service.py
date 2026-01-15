@@ -267,3 +267,219 @@ class GeminiService:
             })
         
         return result
+    
+    def _generate_suggestion_for_requirement(
+        self, 
+        req_id: str,
+        requirement: str,
+        evaluation: Dict[str, str],
+        module: str = None
+    ) -> Dict:
+        """
+        Generate improved requirement based on failed criteria
+        """
+        # Build context about failed criteria
+        failed_criteria_text = "\n".join([
+            f"- {criterion}: {reason}"
+            for criterion, reason in evaluation.items()
+            if criterion != 'error'
+        ])
+        
+        # Build criteria definitions for context
+        criteria_text = "\n".join([
+            f"{i+1}. {criterion}: {meaning}"
+            for i, (criterion, meaning) in enumerate(self.CRITERION_MEANING.items())
+        ])
+        
+        prompt = f"""Context: You're a software requirement expert specializing in ISO/IEC/IEEE 29148 standards.
+
+Task: Improve this requirement to pass ALL 9 quality criteria.
+
+Requirement ID: {req_id}
+Module: {module or 'N/A'}
+Original Requirement: "{requirement}"
+
+Failed Criteria and Reasons:
+{failed_criteria_text}
+
+ISO 29148 Quality Criteria Reference:
+{criteria_text}
+
+Instructions:
+1) Rewrite the requirement to address ALL failed criteria
+2) Keep the core intent and functionality of the original requirement
+3) Make it specific, measurable, and unambiguous
+4) Respond in Thai (technical terms can use English)
+5) Return strict JSON format:
+
+{{
+  "req_id": "{req_id}",
+  "suggested_requirement": "<improved requirement text in Thai>",
+  "improvements": {{
+    "criterion_name": "<explanation of what was fixed in Thai>",
+    ...for each failed criterion
+  }},
+  "explanation": "<brief overall explanation of changes in Thai>"
+}}
+
+Focus on making the requirement:
+- Clear and specific
+- Measurable and verifiable
+- Complete but not overly detailed
+- Singular (one requirement per statement)
+- Appropriate to the abstraction level
+
+Output: JSON only, no preamble."""
+        
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=self.generation_config
+            )
+            
+            result_text = response.text.strip()
+            
+            # Extract JSON
+            if "```json" in result_text:
+                result_text = result_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in result_text:
+                result_text = result_text.split("```")[1].split("```")[0].strip()
+            
+            data = json.loads(result_text)
+            
+            return {
+                "req_id": req_id,
+                "suggested_requirement": data.get("suggested_requirement", ""),
+                "improvements": data.get("improvements", {}),
+                "explanation": data.get("explanation", ""),
+                "success": True
+            }
+            
+        except Exception as e:
+            return {
+                "req_id": req_id,
+                "suggested_requirement": "",
+                "improvements": {},
+                "explanation": f"เกิดข้อผิดพลาด: {str(e)}",
+                "success": False,
+                "error": str(e)
+            }
+    
+    async def generate_suggestions_parallel(
+        self,
+        analyzed_requirements: List[Dict],
+        progress_callback=None
+    ) -> Dict:
+        """
+        Generate suggestions for multiple requirements in parallel
+        Only processes requirements with score < 9/9
+        """
+        # Filter requirements that need improvement (score < 9/9)
+        needs_improvement = []
+        already_perfect = []
+        
+        for req in analyzed_requirements:
+            score = req.get('score', '0/9')
+            current_score = int(score.split('/')[0]) if score else 0
+            
+            if current_score < 9:
+                needs_improvement.append(req)
+            else:
+                already_perfect.append(req)
+        
+        if not needs_improvement:
+            return {
+                "results": [],
+                "summary": {
+                    "total_analyzed": len(analyzed_requirements),
+                    "needs_improvement": 0,
+                    "already_perfect": len(already_perfect),
+                    "suggestions_generated": 0,
+                    "message": "ทุก requirement ผ่านเกณฑ์ครบ 9/9 แล้ว ไม่จำเป็นต้อง suggest"
+                }
+            }
+        
+        total = len(needs_improvement)
+        results = []
+        
+        # Create async tasks
+        loop = asyncio.get_event_loop()
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks
+            futures = [
+                loop.run_in_executor(
+                    executor,
+                    self._generate_suggestion_for_requirement,
+                    req['req_id'],
+                    req['requirement'],
+                    req.get('evaluation', {}),
+                    req.get('module')
+                )
+                for req in needs_improvement
+            ]
+            
+            # Process as they complete
+            completed = 0
+            for future in asyncio.as_completed(futures):
+                result = await future
+                results.append(result)
+                completed += 1
+                
+                # Progress callback
+                if progress_callback:
+                    progress_callback(completed, total)
+        
+        successful = sum(1 for r in results if r.get('success', False))
+        
+        return {
+            "results": results,
+            "summary": {
+                "total_analyzed": len(analyzed_requirements),
+                "needs_improvement": len(needs_improvement),
+                "already_perfect": len(already_perfect),
+                "suggestions_generated": successful,
+                "failed": len(results) - successful,
+                "message": f"สร้าง suggestion สำเร็จ {successful}/{len(needs_improvement)} ข้อ"
+            }
+        }
+    
+    def generate_suggestions_parallel_sync(
+        self,
+        analyzed_requirements: List[Dict]
+    ) -> Dict:
+        """
+        Synchronous version for non-async contexts
+        """
+        return asyncio.run(self.generate_suggestions_parallel(analyzed_requirements))
+    
+    async def generate_suggestion_with_progress(
+        self,
+        analyzed_requirements: List[Dict],
+        websocket=None
+    ):
+        """
+        Generate suggestions with real-time progress updates via WebSocket
+        """
+        async def progress_callback(completed, total):
+            if websocket:
+                await websocket.send_json({
+                    "type": "progress",
+                    "completed": completed,
+                    "total": total,
+                    "percentage": (completed / total) * 100
+                })
+        
+        result = await self.generate_suggestions_parallel(
+            analyzed_requirements,
+            progress_callback=progress_callback
+        )
+        
+        if websocket:
+            await websocket.send_json({
+                "type": "complete",
+                "result": result
+            })
+        
+        return result

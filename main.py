@@ -11,7 +11,7 @@ import csv
 from database import engine, get_db, Base
 import models
 import schemas
-from routers import analyze
+from routers import analyze , suggestion
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -28,6 +28,7 @@ app.add_middleware(
 )
 
 app.include_router(analyze.router)
+app.include_router(suggestion.router)
 
 # Root endpoint
 @app.get("/")
@@ -132,6 +133,27 @@ def get_analyzed_requirements(
         .all()
     return requirements
 
+@app.get("/api/projects/{project_id}/suggestionrequirements",response_model=List[schemas.SuggestedRequirement])
+async def get_suggestions_for_project(
+    project_id: UUID,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    """
+    Get all suggestions for a project
+    """
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    suggestions = db.query(models.SuggestedRequirement)\
+        .filter(models.SuggestedRequirement.project_id == project_id)\
+        .offset(skip)\
+        .limit(limit)\
+        .all()
+    
+    return suggestions
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
