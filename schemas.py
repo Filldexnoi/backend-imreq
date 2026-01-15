@@ -88,7 +88,25 @@ class SuggestedRequirement(SuggestedRequirementBase):
 
     class Config:
         from_attributes = True
-        
+
+# Selected Requirement Schemas
+class SelectedRequirementBase(BaseModel):
+    req_id: str
+    module: str
+    requirement: str
+
+class SelectedRequirementCreate(SelectedRequirementBase):
+    project_id: UUID
+
+class SelectedRequirement(SelectedRequirementBase):
+    id: UUID
+    project_id: UUID
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
 # Column Mapping Schema
 class ColumnMapping(BaseModel):
     req_id: str

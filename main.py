@@ -11,7 +11,7 @@ import csv
 from database import engine, get_db, Base
 import models
 import schemas
-from routers import analyze , suggestion
+from routers import analyze , suggestion  , export
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -29,6 +29,7 @@ app.add_middleware(
 
 app.include_router(analyze.router)
 app.include_router(suggestion.router)
+app.include_router(export.router)
 
 # Root endpoint
 @app.get("/")
@@ -133,8 +134,8 @@ def get_analyzed_requirements(
         .all()
     return requirements
 
-@app.get("/api/projects/{project_id}/suggestionrequirements",response_model=List[schemas.SuggestedRequirement])
-async def get_suggestions_for_project(
+@app.get("/api/projects/{project_id}/suggestedrequirements",response_model=List[schemas.SuggestedRequirement])
+def get_suggestions_for_project(
     project_id: UUID,
     skip: int = 0,
     limit: int = 100,
@@ -154,6 +155,54 @@ async def get_suggestions_for_project(
         .all()
     
     return suggestions
+
+@app.post("/api/projects/{project_id}/selectedrequirements")
+def create_selected_requirements(
+    project_id: UUID,
+    selected_requirements: List[schemas.SelectedRequirementBase],
+    db: Session = Depends(get_db)
+):
+    # 1. check project exists
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # 2. build objects + inject project_id
+    objects = [
+        models.SelectedRequirement(
+            project_id=project_id,
+            **req.dict()
+        )
+        for req in selected_requirements
+    ]
+
+    # 3. bulk insert (performance friendly)
+    db.bulk_save_objects(objects)
+    db.commit()
+
+    return {"inserted": len(objects)}
+
+@app.get("/api/projects/{project_id}/selectedrequirements")
+def get_selected_for_project(
+    project_id: UUID,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    """
+    Get all suggestions for a project
+    """
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    selecteds = db.query(models.SelectedRequirement)\
+        .filter(models.SelectedRequirement.project_id == project_id)\
+        .offset(skip)\
+        .limit(limit)\
+        .all()
+    
+    return selecteds
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
