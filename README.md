@@ -16,7 +16,7 @@
 ### 1. Clone Repository
 ```bash
 git clone <repository-url>
-cd imreq-api
+cd backend-imreq
 ```
 
 ### 2. Create Virtual Environment
