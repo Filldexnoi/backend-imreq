@@ -7,7 +7,7 @@
 ```bash
 # If using git
 git clone <repository-url>
-cd imreq-api
+cd backend-imreq
 
 # Or just download and extract the files
 ```
