@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import List, Optional , Dict , Any
 from datetime import datetime
 from uuid import UUID
@@ -9,16 +9,46 @@ class ProjectBase(BaseModel):
     description: str
 
 class ProjectCreate(ProjectBase):
-    pass
+    requirement_template: Optional[str] = "Others"
+    reference_files: Optional[List[Dict[str, Any]]] = None
 
 class ProjectUpdate(ProjectBase):
     title: Optional[str] = None
     description: Optional[str] = None
+    requirement_template: Optional[str] = None
+    reference_files: Optional[List[Dict[str, Any]]] = None
 
 class Project(ProjectBase):
     id: UUID
+    requirement_template: Optional[str] = None
+    reference_files: Optional[List[Dict[str, Any]]] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
+
+    @field_validator('reference_files', mode='before')
+    @classmethod
+    def validate_reference_files(cls, v):
+        if v is None:
+            return None
+        
+        # If it's already a list of dicts, check format
+        if isinstance(v, list):
+            normalized = []
+            for item in v:
+                if isinstance(item, dict):
+                    # New format: {name, content, size, type}
+                    if 'content' in item:
+                        normalized.append(item)
+                    # Old format: {original_name, stored_name, path, size}
+                    # Convert to new format or skip
+                    elif 'original_name' in item:
+                        # Skip old format files (they're on filesystem)
+                        continue
+                    else:
+                        normalized.append(item)
+            return normalized if normalized else None
+        
+        return v
 
     class Config:
         from_attributes = True
