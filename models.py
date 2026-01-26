@@ -11,6 +11,8 @@ class Project(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
+    requirement_template = Column(String(50), nullable=True)  # EARS, IEEE830, Others
+    reference_files = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

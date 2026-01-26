@@ -7,6 +7,7 @@ import pandas as pd
 import io
 import json
 import csv
+import uuid
 
 from database import engine, get_db, Base
 import models
@@ -43,12 +44,78 @@ def get_projects(skip: int = 0, limit: int = 100, db: Session = Depends(get_db))
     return projects
 
 @app.post("/api/projects", response_model=schemas.ResponseProjectCreate)
-def create_project(project: schemas.ProjectCreate, db: Session = Depends(get_db)):
-    db_project = models.Project(**project.dict())
+async def create_project(
+    title: str = Form(...),
+    description: str = Form(...),
+    requirement_template: str = Form("Others"),
+    files: List[UploadFile] = File(None),
+    db: Session = Depends(get_db)
+):
+    # Handle file uploads - store as base64 in database
+    reference_files = []
+    if files:
+        import base64
+        
+        for file in files:
+            # Read file content
+            content = await file.read()
+            
+            # Convert to base64
+            content_base64 = base64.b64encode(content).decode('utf-8')
+            
+            # Store file metadata with base64 content
+            reference_files.append({
+                "name": file.filename,
+                "content": content_base64,
+                "size": len(content),
+                "type": file.content_type or "application/octet-stream"
+            })
+    
+    # Create project
+    db_project = models.Project(
+        title=title,
+        description=description,
+        requirement_template=requirement_template,
+        reference_files=reference_files if reference_files else None
+    )
     db.add(db_project)
     db.commit()
     db.refresh(db_project)
     return db_project
+
+@app.get("/api/projects/{project_id}/reference-files/{file_index}")
+async def download_reference_file(
+    project_id: UUID,
+    file_index: int,
+    db: Session = Depends(get_db)
+):
+    """Download a reference file by index"""
+    from fastapi.responses import Response
+    import base64
+    
+    # Get project
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Check if reference files exist
+    if not project.reference_files or file_index >= len(project.reference_files):
+        raise HTTPException(status_code=404, detail="Reference file not found")
+    
+    # Get file data
+    file_data = project.reference_files[file_index]
+    
+    # Decode base64 content
+    content = base64.b64decode(file_data['content'])
+    
+    # Return file
+    return Response(
+        content=content,
+        media_type=file_data['type'],
+        headers={
+            'Content-Disposition': f'attachment; filename="{file_data["name"]}"'
+        }
+    )
 
 # Requirements endpoints
 @app.get("/api/projects/{project_id}/originrequirements", response_model=List[schemas.OriginRequirement])

@@ -85,7 +85,6 @@ class GeminiService:
             )
             
             result_text = response.text.strip()
-    
             if not result_text:
                 raise ValueError("LLM returned empty response")
 
@@ -110,17 +109,9 @@ class GeminiService:
                     passed_criteria.append(criterion)
                     total_score += 1
                 else:
-                    # Store failed criteria with reason and suggestion
+                    # Store only reason (not suggestion) as string
                     reason = r.get('reason', '')
-                    suggestion = r.get('suggestion', '')
-                    
-                    # Format: "reason → suggestion"
-                    if reason and suggestion:
-                        failed_evaluation[criterion] = f"{reason} → แนะนำ: {suggestion}"
-                    elif reason:
-                        failed_evaluation[criterion] = reason
-                    else:
-                        failed_evaluation[criterion] = "ไม่ผ่านเกณฑ์"
+                    failed_evaluation[criterion] = reason if reason else "ไม่ผ่านเกณฑ์"
             
             return {
                 "req_id": req_id,
