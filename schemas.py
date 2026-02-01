@@ -1,7 +1,70 @@
-from pydantic import BaseModel, field_validator
-from typing import List, Optional , Dict , Any
+from pydantic import BaseModel, field_validator , EmailStr 
+from typing import List, Optional , Dict , Any 
 from datetime import datetime
 from uuid import UUID
+
+
+# User Schemas
+class UserBase(BaseModel):
+    email: EmailStr
+    username: str
+    full_name: Optional[str] = None
+
+class UserCreate(UserBase):
+    password: str
+
+    @field_validator('password')
+    @classmethod
+    def validate_password(cls, v):
+        if len(v) < 6:
+            raise ValueError('Password must be at least 6 characters')
+        if len(v.encode('utf-8')) > 72:
+            raise ValueError('Password too long (max 72 bytes)')
+        return v
+
+class UserUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    password: Optional[str] = None
+
+    @field_validator('password')
+    @classmethod
+    def validate_password(cls, v):
+        if v is None:
+            return v
+        if len(v) < 6:
+            raise ValueError('Password must be at least 6 characters')
+        if len(v.encode('utf-8')) > 72:
+            raise ValueError('Password too long (max 72 bytes)')
+        return v
+        
+class User(UserBase):
+    id: UUID
+    is_active: bool
+    is_superuser: bool
+    created_at: datetime
+    last_login: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class UserInDB(User):
+    hashed_password: str
+
+# Auth Schemas
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user: User
+
+class TokenData(BaseModel):
+    user_id: Optional[UUID] = None
+    username: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 # Project Schemas
 class ProjectBase(BaseModel):

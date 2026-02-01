@@ -1,14 +1,32 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey , JSON , ARRAY
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey , JSON , ARRAY , Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
 from sqlalchemy.dialects.postgresql import UUID
 import uuid
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    full_name = Column(String(255), nullable=True)
+    is_active = Column(Boolean, default=True)
+    is_superuser = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    last_login = Column(DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
+
 class Project(Base):
     __tablename__ = "projects"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     requirement_template = Column(String(50), nullable=True)  # EARS, IEEE830, Others
@@ -17,6 +35,7 @@ class Project(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     # Relationship
+    user = relationship("User", back_populates="projects")
     origin_requirements = relationship("OriginRequirement", back_populates="project", cascade="all, delete-orphan")
     analyzed_requirements = relationship("AnalyzedRequirement", back_populates="project", cascade="all, delete-orphan")
     suggested_requirements = relationship("SuggestedRequirement", back_populates="project", cascade="all, delete-orphan")

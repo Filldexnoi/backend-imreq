@@ -8,6 +8,7 @@ import logging
 from database import get_db
 import models
 from services.gemini_service import GeminiService
+from services.auth import get_current_active_user
 
 router = APIRouter(prefix="/api/analyze-parallel", tags=["analyze-parallel"])
 
@@ -18,9 +19,22 @@ gemini_service = GeminiService(max_workers=10)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def verify_project_ownership(project_id: UUID, user_id: UUID, db: Session) -> models.Project:
+    """Verify that project exists and belongs to user"""
+    project = db.query(models.Project).filter(
+        models.Project.id == project_id,
+        models.Project.user_id == user_id
+    ).first()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    return project
+
 @router.post("/projects/{project_id}/requirements")
 async def analyze_project_requirements_parallel(
     project_id: UUID,
+    current_user: models.User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -34,10 +48,9 @@ async def analyze_project_requirements_parallel(
     - With 10 workers: ~30-60 seconds
     - Sequential would take: 5-10 minutes
     """
-    # Get project
-    project = db.query(models.Project).filter(models.Project.id == project_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Verify project ownership
+    project = verify_project_ownership(project_id, current_user.id, db)
     
     # Get origin requirements
     origin_requirements = db.query(models.OriginRequirement)\

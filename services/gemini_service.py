@@ -339,10 +339,19 @@ Output: JSON only, no preamble."""
             
             data = json.loads(result_text)
             
+            # Filter improvements to only include criteria that actually failed
+            all_improvements = data.get("improvements", {})
+            failed_criteria_only = {}
+            
+            # Only keep improvements for criteria that are in the evaluation (failed)
+            for criterion, improvement in all_improvements.items():
+                if criterion in evaluation:
+                    failed_criteria_only[criterion] = improvement
+            
             return {
                 "req_id": req_id,
                 "suggested_requirement": data.get("suggested_requirement", ""),
-                "improvements": data.get("improvements", {}),
+                "improvements": failed_criteria_only,  # Only failed criteria
                 "explanation": data.get("explanation", ""),
                 "success": True
             }

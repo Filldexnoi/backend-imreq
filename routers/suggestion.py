@@ -8,6 +8,7 @@ import logging
 from database import get_db
 import models
 from services.gemini_service import GeminiService
+from services.auth import get_current_active_user
 
 router = APIRouter(prefix="/api/suggestions", tags=["suggestions"])
 
@@ -18,9 +19,40 @@ suggestion_service = GeminiService(max_workers=10)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-@router.post("/projects/{project_id}/requirements")
+def verify_project_ownership(project_id: UUID, user_id: UUID, db: Session) -> models.Project:
+    """Verify that project exists and belongs to user"""
+    project = db.query(models.Project).filter(
+        models.Project.id == project_id,
+        models.Project.user_id == user_id
+    ).first()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    return project
+
+def filter_improvements_by_evaluation(
+    improvements: dict, 
+    evaluation: dict
+) -> dict:
+    """
+    Filter improvements to only include criteria that actually failed.
+    Only keep improvements for criteria present in evaluation (failed criteria).
+    """
+    if not evaluation or not improvements:
+        return {}
+    
+    failed_criteria = set(evaluation.keys())
+    return {
+        criterion: improvement 
+        for criterion, improvement in improvements.items() 
+        if criterion in failed_criteria and criterion != 'error'
+    }
+
+@router.post("/projects/{project_id}/generate")
 async def generate_suggestions_for_project(
     project_id: UUID,
+    current_user: models.User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -30,9 +62,7 @@ async def generate_suggestions_for_project(
     - Runs in parallel for better performance
     """
     # Get project
-    project = db.query(models.Project).filter(models.Project.id == project_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = verify_project_ownership(project_id, current_user.id, db)
     
     # Get analyzed requirements
     analyzed_requirements = db.query(models.AnalyzedRequirement)\
@@ -83,6 +113,12 @@ async def generate_suggestions_for_project(
             )
             
             if analyzed_req:
+                # Filter improvements to only failed criteria
+                filtered_improvements = filter_improvements_by_evaluation(
+                    suggestion.get('improvements', {}),
+                    analyzed_req.evaluation or {}
+                )
+                
                 suggested_req = models.SuggestedRequirement(
                     req_id=analyzed_req.req_id,
                     project_id=project_id,
@@ -90,7 +126,7 @@ async def generate_suggestions_for_project(
                     original_requirement=analyzed_req.requirement,
                     suggested_requirement=suggestion.get('suggested_requirement', ''),
                     original_score=analyzed_req.score,
-                    improvements=suggestion.get('improvements', {})
+                    improvements=filtered_improvements
                 )
                 db.add(suggested_req)
                 saved_count += 1
@@ -113,7 +149,7 @@ async def generate_suggestions_for_project(
         logger.error(f"Suggestion generation failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Suggestion generation failed: {str(e)}")
 
-@router.post("/projects/{project_id}/requirements/{req_id}")
+@router.post("/projects/{project_id}/requirements/{req_id}/generate")
 async def generate_suggestion_for_single_requirement(
     project_id: UUID,
     req_id: str,
@@ -126,7 +162,7 @@ async def generate_suggestion_for_single_requirement(
     # Find analyzed requirement by req_id (not UUID id)
     analyzed_req = db.query(models.AnalyzedRequirement)\
         .filter(models.AnalyzedRequirement.project_id == project_id)\
-        .filter(models.AnalyzedRequirement.id == req_id)\
+        .filter(models.AnalyzedRequirement.req_id == req_id)\
         .first()
     
     if not analyzed_req:
@@ -165,7 +201,7 @@ async def generate_suggestion_for_single_requirement(
         # Save or update suggestion
         existing_suggestion = db.query(models.SuggestedRequirement)\
             .filter(models.SuggestedRequirement.project_id == project_id)\
-            .filter(models.SuggestedRequirement.id == req_id)\
+            .filter(models.SuggestedRequirement.req_id == req_id)\
             .first()
         
         if existing_suggestion:
@@ -206,6 +242,75 @@ async def generate_suggestion_for_single_requirement(
         db.rollback()
         logger.error(f"Suggestion generation failed for {req_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Suggestion generation failed: {str(e)}")
+
+@router.get("/projects/{project_id}")
+async def get_suggestions_for_project(
+    project_id: UUID,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    """
+    Get all suggestions for a project
+    """
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    suggestions = db.query(models.SuggestedRequirement)\
+        .filter(models.SuggestedRequirement.project_id == project_id)\
+        .offset(skip)\
+        .limit(limit)\
+        .all()
+    
+    return {
+        "project_id": str(project_id),
+        "total": len(suggestions),
+        "suggestions": [
+            {
+                "id": str(s.id),
+                "req_id": s.req_id,
+                "module": s.module,
+                "original_requirement": s.original_requirement,
+                "suggested_requirement": s.suggested_requirement,
+                "original_score": s.original_score,
+                "improvements": s.improvements,
+                "created_at": s.created_at.isoformat() if s.created_at else None
+            }
+            for s in suggestions
+        ]
+    }
+
+@router.get("/projects/{project_id}/requirements/{req_id}")
+async def get_suggestion_for_requirement(
+    project_id: UUID,
+    req_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get suggestion for a specific requirement
+    """
+    suggestion = db.query(models.SuggestedRequirement)\
+        .filter(models.SuggestedRequirement.project_id == project_id)\
+        .filter(models.SuggestedRequirement.req_id == req_id)\
+        .first()
+    
+    if not suggestion:
+        raise HTTPException(
+            status_code=404, 
+            detail="Suggestion not found. Please generate suggestions first."
+        )
+    
+    return {
+        "id": str(suggestion.id),
+        "req_id": suggestion.req_id,
+        "module": suggestion.module,
+        "original_requirement": suggestion.original_requirement,
+        "suggested_requirement": suggestion.suggested_requirement,
+        "original_score": suggestion.original_score,
+        "improvements": suggestion.improvements,
+        "created_at": suggestion.created_at.isoformat() if suggestion.created_at else None
+    }
 
 @router.websocket("/projects/{project_id}/generate/ws")
 async def generate_suggestions_with_progress(
@@ -272,6 +377,12 @@ async def generate_suggestions_with_progress(
             )
             
             if analyzed_req:
+                # Filter improvements to only failed criteria
+                filtered_improvements = filter_improvements_by_evaluation(
+                    suggestion.get('improvements', {}),
+                    analyzed_req.evaluation or {}
+                )
+                
                 suggested_req = models.SuggestedRequirement(
                     req_id=analyzed_req.req_id,
                     project_id=project_id,
@@ -279,7 +390,7 @@ async def generate_suggestions_with_progress(
                     original_requirement=analyzed_req.requirement,
                     suggested_requirement=suggestion.get('suggested_requirement', ''),
                     original_score=analyzed_req.score,
-                    improvements=suggestion.get('improvements', {})
+                    improvements=filtered_improvements
                 )
                 db.add(suggested_req)
                 saved_count += 1
@@ -302,3 +413,22 @@ async def generate_suggestions_with_progress(
         })
     finally:
         await websocket.close()
+
+@router.delete("/projects/{project_id}")
+async def delete_suggestions_for_project(
+    project_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """
+    Delete all suggestions for a project
+    """
+    deleted_count = db.query(models.SuggestedRequirement)\
+        .filter(models.SuggestedRequirement.project_id == project_id)\
+        .delete()
+    
+    db.commit()
+    
+    return {
+        "message": f"Deleted {deleted_count} suggestions",
+        "deleted_count": deleted_count
+    }
