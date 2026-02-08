@@ -202,9 +202,9 @@ class SelectedRequirement(SelectedRequirementBase):
 
 # Column Mapping Schema
 class ColumnMapping(BaseModel):
-    req_id: str
-    module: str
-    requirement: str
+    requirement: str              # Required
+    req_id: Optional[str] = None  # Optional
+    module: Optional[str] = None  # Optional
 
 # Response Schemas
 class FileUploadResponse(BaseModel):

@@ -369,17 +369,38 @@ async def create_origin_requirement(
     reader = csv.DictReader(io.StringIO(content.decode("utf-8")))
 
     rows = []
+    row_number = 1
+
     for row in reader:
         try:
+            # Requirement is required
+            requirement_text = row.get(mapping_obj.requirement)
+            if not requirement_text:
+                raise HTTPException(400, f"Row {row_number}: requirement column '{mapping_obj.requirement}' is empty")
+            
+            # req_id: use from CSV if provided, otherwise auto-generate
+            if mapping_obj.req_id and mapping_obj.req_id in row and row[mapping_obj.req_id]:
+                req_id = row[mapping_obj.req_id]
+            else:
+                req_id = f"REQ-{row_number}"
+            
+            # module: use from CSV if provided, otherwise empty string
+            if mapping_obj.module and mapping_obj.module in row:
+                module = row[mapping_obj.module] or ""
+            else:
+                module = ""
+            
             rows.append({
-                "req_id": row[mapping_obj.req_id],
-                "module": row[mapping_obj.module],
-                "requirement": row[mapping_obj.requirement],
+                "req_id": req_id,
+                "module": module,
+                "requirement": requirement_text,
             })
+            row_number += 1
+
         except KeyError as e:
             raise HTTPException(
                 400,
-                f"ไม่พบ column {e} ใน CSV"
+                f"Row {row_number}: ไม่พบ column {e} ใน CSV"
             )
 
     objects = [
