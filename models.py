@@ -80,9 +80,11 @@ class SuggestedRequirement(Base):
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     module = Column(String(255), nullable=True)
     original_requirement = Column(Text, nullable=False)  # Original requirement text
-    suggested_requirement = Column(Text, nullable=False)  # Improved requirement text
+    suggested_requirement = Column(Text, nullable=True)  # Improved requirement text (null if split)
     original_score = Column(String(20), nullable=True)  # Score before improvement
     improvements = Column(JSON, nullable=True)  # What was fixed for each criterion
+    is_split = Column(Boolean, default=False)  # True if requirement was split due to Singular criterion
+    split_requirements = Column(JSON, nullable=True)  # Array of split requirements [{req_id, requirement, module}, ...]
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

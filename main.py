@@ -1,13 +1,19 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from typing import List 
+from sqlalchemy import asc
+from typing import List
 from uuid import UUID
 import pandas as pd
 import io
 import json
 import csv
 import uuid
+import re
+import numpy as np
+import gensim
+import gensim.models.doc2vec
+from sklearn.metrics.pairwise import cosine_similarity as cosine_sim
 
 from database import engine, get_db, Base
 import models
@@ -338,6 +344,7 @@ def get_origin_requirements(
     
     requirements = db.query(models.OriginRequirement)\
         .filter(models.OriginRequirement.project_id == project_id)\
+        .order_by(asc(models.OriginRequirement.req_id))\
         .offset(skip)\
         .limit(limit)\
         .all()
@@ -366,7 +373,15 @@ async def create_origin_requirement(
         raise HTTPException(status_code=404, detail="Project not found")
     
     content = await file.read()
-    reader = csv.DictReader(io.StringIO(content.decode("utf-8")))
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            decoded = content.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise HTTPException(400, "ไม่สามารถ decode ไฟล์ CSV ได้ กรุณาบันทึกไฟล์เป็น UTF-8 แล้วลองใหม่")
+    reader = csv.DictReader(io.StringIO(decoded))
 
     rows = []
     row_number = 1
@@ -433,6 +448,7 @@ def get_analyzed_requirements(
     
     requirements = db.query(models.AnalyzedRequirement)\
         .filter(models.AnalyzedRequirement.project_id == project_id)\
+        .order_by(asc(models.AnalyzedRequirement.req_id))\
         .offset(skip)\
         .limit(limit)\
         .all()
@@ -459,6 +475,7 @@ def get_suggestions_for_project(
     
     suggestions = db.query(models.SuggestedRequirement)\
         .filter(models.SuggestedRequirement.project_id == project_id)\
+        .order_by(asc(models.SuggestedRequirement.req_id))\
         .offset(skip)\
         .limit(limit)\
         .all()
@@ -505,6 +522,38 @@ def create_selected_requirements(
 
     return {"inserted": len(objects)}
 
+@app.patch("/api/projects/{project_id}/selectedrequirements")
+def upsert_single_selected_requirement(
+    project_id: UUID,
+    body: schemas.SelectedRequirementUpsert,
+    current_user: models.User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Upsert a single requirement selection (delete old req_ids, insert new ones)."""
+    project = db.query(models.Project).filter(
+        models.Project.id == project_id,
+        models.Project.user_id == current_user.id
+    ).first()
+
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if body.delete_req_ids:
+        db.query(models.SelectedRequirement)\
+            .filter(
+                models.SelectedRequirement.project_id == project_id,
+                models.SelectedRequirement.req_id.in_(body.delete_req_ids)
+            ).delete(synchronize_session=False)
+
+    objects = [
+        models.SelectedRequirement(project_id=project_id, **req.dict())
+        for req in body.insert
+    ]
+    db.bulk_save_objects(objects)
+    db.commit()
+
+    return {"deleted": len(body.delete_req_ids), "inserted": len(objects)}
+
 @app.get("/api/projects/{project_id}/selectedrequirements")
 def get_selected_for_project(
     project_id: UUID,
@@ -526,11 +575,124 @@ def get_selected_for_project(
     
     selecteds = db.query(models.SelectedRequirement)\
         .filter(models.SelectedRequirement.project_id == project_id)\
+        .order_by(asc(models.SelectedRequirement.req_id))\
         .offset(skip)\
         .limit(limit)\
         .all()
     
     return selecteds
+@app.get("/api/projects/{project_id}/suggestedrequirements/similarity")
+def get_similarity_summary(
+    project_id: UUID,
+    current_user: models.User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Compute Jaccard Index and Doc2Vec cosine similarity between
+    original_requirement and suggested_requirement for each non-split pair.
+    """
+    project = db.query(models.Project).filter(
+        models.Project.id == project_id,
+        models.Project.user_id == current_user.id
+    ).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    rows = db.query(models.SuggestedRequirement).filter(
+        models.SuggestedRequirement.project_id == project_id,
+    ).order_by(asc(models.SuggestedRequirement.req_id)).all()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No suggested requirements found")
+
+    def tokenize(text: str) -> list:
+        return re.findall(r'[\w\u0E00-\u0E7F]+', (text or '').lower())
+
+    def jaccard_similarity(x, y):
+        sx, sy = set(x), set(y)
+        if not sx and not sy:
+            return 1.0
+        union = sx | sy
+        if not union:
+            return 0.0
+        return len(sx & sy) / len(union)
+
+    def get_suggested_text(row) -> str:
+        if row.is_split and row.split_requirements:
+            return ' '.join(s.get('requirement', '') for s in row.split_requirements)
+        return row.suggested_requirement or ''
+
+    orig_tokens = [tokenize(r.original_requirement) for r in rows]
+    sugg_tokens = [tokenize(get_suggested_text(r)) for r in rows]
+
+    # Train Doc2Vec on combined corpus
+    all_tokens = orig_tokens + sugg_tokens
+
+    def tagged_documents(token_lists):
+        for i, tokens in enumerate(token_lists):
+            yield gensim.models.doc2vec.TaggedDocument(tokens, [i])
+
+    training_data = list(tagged_documents(all_tokens))
+    model = gensim.models.doc2vec.Doc2Vec(vector_size=40, min_count=1, epochs=60)
+    model.build_vocab(training_data)
+    model.train(training_data, total_examples=model.corpus_count, epochs=model.epochs)
+
+    n = len(rows)
+    vectors = [model.infer_vector(tokens).reshape(1, -1) for tokens in all_tokens]
+
+    def interpret(jaccard: float, emb: float) -> str:
+        if emb >= 0.95:
+            return 'เหมือนมาก'
+        elif emb >= 0.80:
+            return 'ความหมายใกล้เคียง'
+        elif emb >= 0.60:
+            return 'เปลี่ยนบางส่วน'
+        else:
+            return 'เปลี่ยนมาก'
+
+    results = []
+    for i, row in enumerate(rows):
+        j = round(jaccard_similarity(orig_tokens[i], sugg_tokens[i]), 4)
+        emb = round(float(cosine_sim(vectors[i], vectors[n + i])[0][0]), 4)
+        results.append({
+            "req_id": row.req_id,
+            "original_score": row.original_score,
+            "jaccard": j,
+            "doc2vec_sim": emb,
+            "interpretation": interpret(j, emb),
+            "is_split": bool(row.is_split),
+        })
+
+    jaccards = [r["jaccard"] for r in results]
+    embeds = [r["doc2vec_sim"] for r in results]
+
+    summary = {
+        "total": n,
+        "jaccard": {
+            "mean": round(float(np.mean(jaccards)), 4),
+            "median": round(float(np.median(jaccards)), 4),
+            "min": round(float(np.min(jaccards)), 4),
+            "max": round(float(np.max(jaccards)), 4),
+            "min_req": results[int(np.argmin(jaccards))]["req_id"],
+            "max_req": results[int(np.argmax(jaccards))]["req_id"],
+        },
+        "doc2vec": {
+            "mean": round(float(np.mean(embeds)), 4),
+            "median": round(float(np.median(embeds)), 4),
+            "min": round(float(np.min(embeds)), 4),
+            "max": round(float(np.max(embeds)), 4),
+            "min_req": results[int(np.argmin(embeds))]["req_id"],
+            "max_req": results[int(np.argmax(embeds))]["req_id"],
+        },
+        "interpretation_counts": {
+            k: sum(1 for r in results if r["interpretation"] == k)
+            for k in ["เหมือนมาก", "ความหมายใกล้เคียง", "เปลี่ยนบางส่วน", "เปลี่ยนมาก"]
+        },
+    }
+
+    return {"summary": summary, "pairs": results}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

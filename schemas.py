@@ -166,9 +166,11 @@ class SuggestedRequirementBase(BaseModel):
     req_id: str
     module: str
     original_requirement: str
-    suggested_requirement: str
+    suggested_requirement: Optional[str] = None  # Null if split
     original_score: Optional[str] = None
-    improvements: Optional[Dict[str, str]] = None  # What was fixed for each criterion
+    improvements: Optional[Dict[str, Any]] = None  # What was fixed for each criterion (str or {description, cited_rules})
+    is_split: Optional[bool] = False  # True if requirement was split
+    split_requirements: Optional[List[Dict[str, Any]]] = None  # Array of split requirements
 
 class SuggestedRequirementCreate(SuggestedRequirementBase):
     project_id: UUID
@@ -190,6 +192,10 @@ class SelectedRequirementBase(BaseModel):
 
 class SelectedRequirementCreate(SelectedRequirementBase):
     project_id: UUID
+
+class SelectedRequirementUpsert(BaseModel):
+    delete_req_ids: List[str]
+    insert: List[SelectedRequirementBase]
 
 class SelectedRequirement(SelectedRequirementBase):
     id: UUID

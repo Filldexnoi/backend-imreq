@@ -5,7 +5,7 @@ from uuid import UUID
 import asyncio
 import logging
 
-from database import get_db
+from database import get_db, get_db_with_retry
 import models
 from services.gemini_service import GeminiService
 from services.auth import get_current_active_user
@@ -83,7 +83,8 @@ async def generate_suggestions_for_project(
             "module": req.module,
             "requirement": req.requirement,
             "score": req.score,
-            "evaluation": req.evaluation or {}
+            "evaluation": req.evaluation or {},
+            "requirement_template": project.requirement_template or "Others"
         })
     
     logger.info(f"Found {len(req_data)} analyzed requirements for project {project_id}")
@@ -124,9 +125,11 @@ async def generate_suggestions_for_project(
                     project_id=project_id,
                     module=analyzed_req.module,
                     original_requirement=analyzed_req.requirement,
-                    suggested_requirement=suggestion.get('suggested_requirement', ''),
+                    suggested_requirement=suggestion.get('suggested_requirement'),
                     original_score=analyzed_req.score,
-                    improvements=filtered_improvements
+                    improvements=filtered_improvements,
+                    is_split=suggestion.get('is_split', False),
+                    split_requirements=suggestion.get('split_requirements')
                 )
                 db.add(suggested_req)
                 saved_count += 1
@@ -159,22 +162,27 @@ async def generate_suggestion_for_single_requirement(
     Generate improvement suggestion for a single requirement
     Returns 400 if requirement already has 9/9 score
     """
+    # Get project to get requirement_template
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
     # Find analyzed requirement by req_id (not UUID id)
     analyzed_req = db.query(models.AnalyzedRequirement)\
         .filter(models.AnalyzedRequirement.project_id == project_id)\
         .filter(models.AnalyzedRequirement.req_id == req_id)\
         .first()
-    
+
     if not analyzed_req:
         raise HTTPException(
-            status_code=404, 
+            status_code=404,
             detail="Analyzed requirement not found. Please analyze this requirement first."
         )
-    
+
     # Check if already perfect
     score = analyzed_req.score or "0/9"
     current_score = int(score.split('/')[0])
-    
+
     if current_score >= 9:
         return {
             "message": "Requirement already passes all 9 criteria",
@@ -182,14 +190,15 @@ async def generate_suggestion_for_single_requirement(
             "score": score,
             "suggestion_needed": False
         }
-    
+
     try:
         # Generate suggestion
         result = suggestion_service._generate_suggestion_for_requirement(
             req_id=analyzed_req.req_id,
             requirement=analyzed_req.requirement,
             evaluation=analyzed_req.evaluation or {},
-            module=analyzed_req.module
+            module=analyzed_req.module,
+            requirement_template=project.requirement_template or "Others"
         )
         
         if not result.get('success', False):
@@ -207,10 +216,12 @@ async def generate_suggestion_for_single_requirement(
         if existing_suggestion:
             # Update existing
             existing_suggestion.original_requirement = analyzed_req.requirement
-            existing_suggestion.suggested_requirement = result.get('suggested_requirement', '')
+            existing_suggestion.suggested_requirement = result.get('suggested_requirement')
             existing_suggestion.original_score = analyzed_req.score
             existing_suggestion.improvements = result.get('improvements', {})
             existing_suggestion.module = analyzed_req.module
+            existing_suggestion.is_split = result.get('is_split', False)
+            existing_suggestion.split_requirements = result.get('split_requirements')
             logger.info(f"Updated existing suggestion for {req_id}")
         else:
             # Create new
@@ -219,19 +230,23 @@ async def generate_suggestion_for_single_requirement(
                 project_id=project_id,
                 module=analyzed_req.module,
                 original_requirement=analyzed_req.requirement,
-                suggested_requirement=result.get('suggested_requirement', ''),
+                suggested_requirement=result.get('suggested_requirement'),
                 original_score=analyzed_req.score,
-                improvements=result.get('improvements', {})
+                improvements=result.get('improvements', {}),
+                is_split=result.get('is_split', False),
+                split_requirements=result.get('split_requirements')
             )
             db.add(new_suggestion)
             logger.info(f"Created new suggestion for {req_id}")
-        
+
         db.commit()
-        
+
         return {
             "req_id": req_id,
             "original_requirement": analyzed_req.requirement,
-            "suggested_requirement": result.get('suggested_requirement', ''),
+            "is_split": result.get('is_split', False),
+            "suggested_requirement": result.get('suggested_requirement'),
+            "split_requirements": result.get('split_requirements'),
             "original_score": analyzed_req.score,
             "improvements": result.get('improvements', {}),
             "explanation": result.get('explanation', ''),
@@ -324,11 +339,21 @@ async def generate_suggestions_with_progress(
     await websocket.accept()
     
     try:
+        # Get project to get requirement_template
+        project = db.query(models.Project).filter(models.Project.id == project_id).first()
+        if not project:
+            await websocket.send_json({
+                "type": "error",
+                "message": "Project not found"
+            })
+            await websocket.close()
+            return
+
         # Get analyzed requirements
         analyzed_requirements = db.query(models.AnalyzedRequirement)\
             .filter(models.AnalyzedRequirement.project_id == project_id)\
             .all()
-        
+
         if not analyzed_requirements:
             await websocket.send_json({
                 "type": "error",
@@ -336,67 +361,83 @@ async def generate_suggestions_with_progress(
             })
             await websocket.close()
             return
-        
+
         req_data = [
             {
                 "req_id": req.req_id,
                 "module": req.module,
                 "requirement": req.requirement,
                 "score": req.score,
-                "evaluation": req.evaluation or {}
+                "evaluation": req.evaluation or {},
+                "requirement_template": project.requirement_template or "Others"
             }
             for req in analyzed_requirements
         ]
-        
+        # Snapshot evaluations for filtering later (plain dicts, no live ORM)
+        eval_snapshot = {req.req_id: req.evaluation or {} for req in analyzed_requirements}
+        analyzed_snapshot = [
+            {"req_id": r.req_id, "module": r.module, "requirement": r.requirement, "score": r.score}
+            for r in analyzed_requirements
+        ]
+
+        # Release DB connection BEFORE the long LLM processing
+        db.close()
+
         # Send start message
         await websocket.send_json({
             "type": "start",
             "total": len(req_data)
         })
-        
-        # Generate suggestions with progress
+
+        # Generate suggestions with progress — no DB connection held here
         result = await suggestion_service.generate_suggestion_with_progress(
             req_data,
             websocket=websocket
         )
-        
-        # Clear old suggestions
-        db.query(models.SuggestedRequirement)\
-            .filter(models.SuggestedRequirement.project_id == project_id)\
-            .delete()
-        
-        # Save results
-        saved_count = 0
-        for suggestion in result['results']:
-            if not suggestion.get('success', False):
-                continue
-            
-            analyzed_req = next(
-                (r for r in analyzed_requirements if r.req_id == suggestion['req_id']),
-                None
-            )
-            
-            if analyzed_req:
-                # Filter improvements to only failed criteria
-                filtered_improvements = filter_improvements_by_evaluation(
-                    suggestion.get('improvements', {}),
-                    analyzed_req.evaluation or {}
+
+        # Open a fresh DB session just for saving results (retry if DB is in recovery)
+        db_save = get_db_with_retry()
+        try:
+            db_save.query(models.SuggestedRequirement)\
+                .filter(models.SuggestedRequirement.project_id == project_id)\
+                .delete()
+
+            saved_count = 0
+            for suggestion in result['results']:
+                if not suggestion.get('success', False):
+                    continue
+
+                analyzed_req = next(
+                    (r for r in analyzed_snapshot if r["req_id"] == suggestion['req_id']),
+                    None
                 )
-                
-                suggested_req = models.SuggestedRequirement(
-                    req_id=analyzed_req.req_id,
-                    project_id=project_id,
-                    module=analyzed_req.module,
-                    original_requirement=analyzed_req.requirement,
-                    suggested_requirement=suggestion.get('suggested_requirement', ''),
-                    original_score=analyzed_req.score,
-                    improvements=filtered_improvements
-                )
-                db.add(suggested_req)
-                saved_count += 1
-        
-        db.commit()
-        
+
+                if analyzed_req:
+                    filtered_improvements = filter_improvements_by_evaluation(
+                        suggestion.get('improvements', {}),
+                        eval_snapshot.get(analyzed_req["req_id"], {})
+                    )
+
+                    db_save.add(models.SuggestedRequirement(
+                        req_id=analyzed_req["req_id"],
+                        project_id=project_id,
+                        module=analyzed_req["module"],
+                        original_requirement=analyzed_req["requirement"],
+                        suggested_requirement=suggestion.get('suggested_requirement'),
+                        original_score=analyzed_req["score"],
+                        improvements=filtered_improvements,
+                        is_split=suggestion.get('is_split', False),
+                        split_requirements=suggestion.get('split_requirements'),
+                    ))
+                    saved_count += 1
+
+            db_save.commit()
+        except Exception as save_err:
+            db_save.rollback()
+            raise save_err
+        finally:
+            db_save.close()
+
         await websocket.send_json({
             "type": "saved",
             "message": f"Saved {saved_count} suggestions to database",

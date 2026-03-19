@@ -1,32 +1,93 @@
 import os
+import base64
+import io
+import logging
 from google import genai
-from typing import Dict, List
+from typing import Dict, List, Optional
 import json
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+logger = logging.getLogger(__name__)
 
 class GeminiService:
     """
     Optimized Gemini Service with parallel processing
     """
-    
+
     CRITERION_MEANING: Dict[str, str] = {
-        "Appropriate": "The specific intent and amount of detail of the requirement is appropriate to the level of the entity to which it refers (level of abstraction appropriate to the level of entity). This includes avoiding unnecessary constraints on the architecture or design while allowing implementation independence to the extent possible.",
-        "Complete": "The requirement sufficiently describes the necessary capability, characteristic, constraint or quality factor to meet the entity need without needing other information to understand the requirement.",
+        "Appropriate": "The specific intent and amount of detail of the requirement is appropriate to the level \
+                        of the entity to which it refers (level of abstraction appropriate to the level of entity). This includes \
+                        avoiding unnecessary constraints on the architecture or design while allowing implementation \
+                        independence to the extent possible.",
+        "Complete": "The requirement sufficiently describes the necessary capability, characteristic, constraint \
+                    or quality factor to meet the entity need without needing other information to understand the \
+                    requirement.",
         "Conforming": "The individual items conform to an approved standard template and style for writing requirements, when applicable.",
         "Correct": "The requirement is an accurate representation of the entity need from which it was transformed.",
         "Feasible": "The requirement can be realized within system constraints (e.g., cost, schedule, technical) with acceptable risk.",
-        "Necessary": "The requirement defines an essential capability, characteristic, constraint and/or quality factor. If it is not included in the set of requirements, a deficiency in capability or characteristic will exist, which cannot be fulfilled by implementing other requirements.",
-        "Singular": "The requirement states a single capability, characteristic, constraint or quality factor.",
+        "Necessary": "The requirement defines an essential capability, characteristic, constraint and/or quality\
+                    factor. If it is not included in the set of requirements, a deficiency in capability or characteristic will\
+                    exist, which cannot be fulfilled by implementing other requirements. The requirement is currently\
+                    applicable and has not been made obsolete by the passage of time. Requirements with planned\
+                    expiration dates or applicability dates are clearly identified.",
+        "Singular": "The requirement states a single capability, characteristic, constraint or quality factor.\
+            (Although a single requirement consists of a single function, quality or constraint, it can have\
+multiple conditions under which the requirement is to be met.)",
         "Unambiguous": "The requirement is stated in such a way so that it can be interpreted in only one way. The requirement is stated simply and is easy to understand.",
         "Verifiable": "The requirement is structured and worded such that its realization can be proven (verified) to the customer's satisfaction at the level the requirements exists. Verifiability is enhanced when the requirement is measurable.",
+    }
+
+    TEMPLATE_DEFINITIONS: Dict[str, Dict[str, str]] = {
+        "EARS": {
+            "name": "EARS (Easy Approach to Requirements Syntax)",
+            "description": "EARS provides 5 syntax patterns for writing requirements",
+            "patterns": """
+1. Ubiquitous (Always active): "The [system] shall [requirement]"
+2. State-driven: "WHILE [in a state], the [system] shall [requirement]"
+3. Event-driven: "WHEN [trigger], the [system] shall [requirement]"
+4. Unwanted behavior: "IF [unwanted condition], THEN the [system] shall [requirement]"
+5. Optional feature: "WHERE [feature included], the [system] shall [requirement]"
+
+Key characteristics:
+- Uses "shall" for mandatory requirements
+- Clear trigger conditions (WHEN, WHILE, IF, WHERE)
+- Single responsibility per requirement
+- Avoids ambiguous words (may, might, can, should in conditions)
+"""
+        },
+        "ISO29148": {
+            "name": "ISO/IEC/IEEE 29148",
+            "description": "ISO 29148 standard for requirement writing",
+            "patterns": """
+General guidelines:
+- Use "shall" for mandatory requirements
+- Use "should" for recommended features (use sparingly)
+- Avoid ambiguous terms (may, might, can, probably, as appropriate)
+- Each requirement should be atomic (singular)
+- Use clear, concise language
+- Include measurable criteria when possible
+- Use active voice
+
+Example patterns:
+- "The [system] shall [action] [object] [criteria]"
+- "The [function] shall provide [capability]"
+- Avoid: "The system should be user-friendly" (ambiguous)
+- Better: "The system shall respond to user actions within 2 seconds"
+"""
+        },
+        "Others": {
+            "name": "Custom/No specific template",
+            "description": "No specific template applied",
+            "patterns": "Requirements may follow custom organizational standards or no specific template."
+        }
     }
     
     def __init__(self, max_workers: int = 10):
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY not found in environment variables")
-        
+
         self.client = genai.Client(api_key=api_key)
         self.model = 'gemini-2.0-flash-lite'
         self.max_workers = max_workers
@@ -35,122 +96,382 @@ class GeminiService:
                 "top_p": 1,
                 "top_k": 1
         }
-    
-    def _analyze_single_requirement_all_criteria(self, requirement: str, req_id: str) -> Dict:
+
+    def _extract_reference_text(self, reference_files: list) -> Optional[str]:
         """
-        Analyze ONE requirement against ALL 9 criteria in ONE API call
+        Decode base64 reference files and extract plain text.
+        Supports PDF (pdfplumber), TXT/Markdown, and DOCX (python-docx).
+        Returns None if no files or all extractions fail.
+        Truncates combined output to ~10 000 chars to stay within token budget.
         """
-        criteria_text = "\n".join([
-            f"{i+1}. {criterion}: {meaning}"
-            for i, (criterion, meaning) in enumerate(self.CRITERION_MEANING.items())
-        ])
-        
-        prompt = f"""Context: You're a software requirement expert.
-        Analyze this requirement against ALL 9 ISO/IEC/IEEE 29148 quality criteria.
+        if not reference_files:
+            return None
 
-        Requirement ID: {req_id}
-        Requirement: "{requirement}"
+        texts = []
+        for file_info in reference_files:
+            name = file_info.get("name", "")
+            content_b64 = file_info.get("content", "")
+            file_type = file_info.get("type", "")
 
-        ISO 29148 Quality Criteria:
-        {criteria_text}
+            try:
+                content_bytes = base64.b64decode(content_b64)
 
-        Instructions:
-        1) Evaluate ALL 9 criteria thoroughly
-        2) Respond in Thai (software terms can use English)
-        3) Return strict JSON:
-        {{
-        "req_id": "{req_id}",
-        "results": [
-            {{
-            "criterion": "Appropriate",
-            "pass": true|false,
-            "score": 1|0,
-            "reason": "<why it failed in Thai (empty if passed)>",
-            "suggestion": "<how to fix in Thai (empty if passed)>"
-            }},
-            ... (all 9 criteria)
-        ]
-        }}
+                if file_type == "application/pdf" or name.lower().endswith(".pdf"):
+                    import pdfplumber
+                    with pdfplumber.open(io.BytesIO(content_bytes)) as pdf:
+                        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+                    text = text.strip()
+                    if not text:
+                        logger.warning(f"[ref_extract] '{name}': PDF extracted empty text (scanned/image PDF?)")
+                    else:
+                        logger.info(f"[ref_extract] '{name}': extracted {len(text)} chars from PDF")
+                    texts.append(f"[{name}]\n{text}")
 
-        For FAILED criteria: provide detailed reason and specific suggestion
-        For PASSED criteria: leave reason and suggestion empty
-        Be specific and reference the actual requirement text.
-        Output: JSON only."""
-        
+                elif file_type in ("text/plain", "text/markdown") or name.lower().endswith((".txt", ".md")):
+                    text = content_bytes.decode("utf-8", errors="ignore").strip()
+                    logger.info(f"[ref_extract] '{name}': extracted {len(text)} chars from text")
+                    texts.append(f"[{name}]\n{text}")
+
+                elif "word" in file_type or name.lower().endswith(".docx"):
+                    import docx
+                    doc = docx.Document(io.BytesIO(content_bytes))
+                    text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+                    logger.info(f"[ref_extract] '{name}': extracted {len(text)} chars from DOCX")
+                    texts.append(f"[{name}]\n{text}")
+
+                else:
+                    logger.warning(f"[ref_extract] '{name}': unsupported type '{file_type}' — skipped")
+
+            except Exception as e:
+                logger.error(f"[ref_extract] '{name}': extraction failed — {type(e).__name__}: {e}")
+                continue
+
+        if not texts:
+            logger.warning("[ref_extract] No text extracted from any reference file")
+            return None
+
+        combined = "\n\n---\n\n".join(texts)
+        if len(combined) > 10000:
+            combined = combined[:10000] + "\n...[truncated]"
+        return combined
+
+    CRITERIA_NAMES = [
+        "Appropriate", "Complete", "Conforming", "Correct",
+        "Feasible", "Necessary", "Singular", "Unambiguous", "Verifiable",
+    ]
+
+    # ISO 29148 writing rules (from sections 5.2.4 and 5.2.7)
+    RULES: List[Dict] = [
+        {"section": "5.2.4", "name": "Modal Verb 'Should'",       "description": "Use 'should' to denote a non-mandatory goal, preference, or recommended practice."},
+        {"section": "5.2.4", "name": "Active Voice",               "description": "Use active voice to clearly identify the subject (e.g., 'The system shall...' instead of 'It is required that...')."},
+        {"section": "5.2.7", "name": "Subjective Language",        "description": "Avoid terms like 'user-friendly', 'easy to use', 'robust', or 'reliable' without quantitative criteria."},
+        {"section": "5.2.7", "name": "Open-ended Terms",           "description": "Avoid using 'etc.', 'and so on', or 'and/or' which lead to uncertainty in scope."},
+        {"section": "5.2.4", "name": "System Performance",         "description": "Requirements should define the performance of the system, not a capability of the user or operator."},
+        {"section": "5.2.7", "name": "Vague Pronouns",             "description": "Avoid using 'it', 'this', 'that', or 'they' to refer to subjects; always restate the subject for clarity."},
+        {"section": "5.2.4", "name": "Avoid 'Must'",               "description": "Avoid using the term 'must' to prevent potential misinterpretation; use 'shall' for binding requirements."},
+        {"section": "5.2.4", "name": "Positive Phrasing",          "description": "Requirements should be stated as positive statements (what the system shall do) rather than negative (shall not)."},
+        {"section": "5.2.4", "name": "Measurable Conditions",      "description": "A well-formed requirement is qualified by measurable conditions that define its boundaries."},
+        {"section": "5.2.7", "name": "Superlatives",               "description": "Avoid superlatives like 'best', 'fastest', or 'most efficient' unless they are verifiable constraints."},
+        {"section": "5.2.7", "name": "Comparative Phrases",        "description": "Avoid phrases like 'better than' or 'superior' because they cannot be verified without a defined baseline."},
+        {"section": "5.2.7", "name": "Loopholes",                  "description": "Avoid phrases like 'if possible', 'as appropriate', 'as applicable', or 'including but not limited to'."},
+        {"section": "5.2.4", "name": "Avoid 'Shall be able to'",   "description": "Avoid using 'shall be able to' or 'shall be capable of'; state the action directly (e.g., 'The system shall [Action]')."},
+        {"section": "5.2.4", "name": "Formal Syntax",              "description": "A well-formed requirement should follow the structure: [Condition] [Subject] [Action] [Object] [Constraint]."},
+        {"section": "5.2.4", "name": "Modal Verb 'Shall'",         "description": "Use 'shall' to denote a binding, mandatory requirement that is contractually required."},
+        {"section": "5.2.7", "name": "Design Independence",        "description": "Requirements should state 'what' is needed, not 'how'. Do not include design decisions or commercial products."},
+        {"section": "5.2.7", "name": "Ambiguous Adjectives",       "description": "Avoid vague adjectives like 'adequate', 'significant', 'sufficient', 'flexible', or 'minimal'."},
+    ]
+
+    # Which rules are relevant per criterion (for focused prompt injection)
+    RULES_BY_CRITERION: Dict[str, List[str]] = {
+        "Appropriate":  ["Design Independence", "System Performance"],
+        "Complete":     ["Formal Syntax", "Open-ended Terms"],
+        "Conforming":   ["Modal Verb 'Shall'", "Modal Verb 'Should'", "Avoid 'Must'",
+                         "Active Voice", "Positive Phrasing", "Formal Syntax", "Avoid 'Shall be able to'"],
+        "Correct":      [],
+        "Feasible":     [],
+        "Necessary":    [],
+        "Singular":     ["Open-ended Terms"],
+        "Unambiguous":  ["Subjective Language", "Vague Pronouns", "Ambiguous Adjectives",
+                         "Superlatives", "Comparative Phrases", "Loopholes"],
+        "Verifiable":   ["Measurable Conditions", "Open-ended Terms", "Superlatives"],
+    }
+
+    def _build_rules_reference(self, criterion: str) -> str:
+        """Build a rules reference string for the given criterion (for LLM prompt)."""
+        rule_names = self.RULES_BY_CRITERION.get(criterion, [])
+        if not rule_names:
+            return ""
+        rules_lookup = {r["name"]: r for r in self.RULES}
+        lines = []
+        for name in rule_names:
+            r = rules_lookup.get(name)
+            if r:
+                lines.append(f'- "{name}" (§{r["section"]}): {r["description"]}')
+        if not lines:
+            return ""
+        return "\nReference rules (cite relevant ones in cited_rules):\n" + "\n".join(lines)
+
+    # Per-criterion evaluation instructions (focused, single-responsibility)
+    CRITERION_INSTRUCTIONS: Dict[str, str] = {
+        "Appropriate": """The requirement must state WHAT the system shall do, not HOW.
+It must NOT impose unnecessary design or architectural constraints.
+
+Checks to perform:
+1. Design Constraint Check: Scan for commercial product names, vendor names, specific technology brands, or explicit architecture/implementation choices (e.g., "use React", "store in MySQL", "deploy on AWS"). If found at system-requirement level → FAIL; name the exact term.
+2. Tolerance/Detail Level Check: If numeric tolerances or component-level specifications appear in what should be a high-level system requirement → FAIL; identify the over-specified detail.""",
+
+        "Complete": """The requirement must be self-contained and understandable without consulting external sources.
+
+Checks to perform:
+1. Self-Contained Check: Verify the sentence has a clear subject (WHO/WHAT system), action (SHALL do), and condition or measurable outcome. FAIL if any slot is missing; name the missing slot.
+2. Reference Check: If the requirement cites another document without specifying a version number or date → FAIL; name the unversioned reference.""",
+
+        "Conforming": """The requirement must follow the approved template and standard writing conventions.
+
+Template in use: {template_name}
+Template patterns:
+{template_patterns}
+
+Checks to perform:
+1. Mandatory Keyword Check: FAIL if obligation is expressed using "will", "should", or "may" instead of "shall" (or "ต้อง" in Thai) for mandatory requirements.
+2. Voice Check: FAIL if the requirement uses passive voice (e.g., "shall be processed by", "will be handled"). Active voice required.
+3. Negative Constraint Check: FAIL if the requirement uses "shall not" form; recommend rewriting as a positive statement.
+4. Template Pattern Check: Identify which template pattern this requirement matches (or "None" if it does not match any).
+
+Return these extra fields in your JSON:
+- "detected_pattern": e.g. "EARS: Event-driven", "ISO29148: Standard", "None" """,
+
+        "Correct": """The requirement must accurately represent the original stakeholder need it was derived from.
+
+{ref_block}
+
+Check to perform:
+- IF reference documents are provided:
+  Search the reference for any section describing the intent, scope, or source of this type of requirement.
+  Use BROAD matching — look for any passage that could be the basis or motivation for this requirement.
+  PASS if the requirement's intent is consistent with any described need in the reference; quote the relevant passage.
+  FAIL if the requirement contradicts or significantly misrepresents the described intent; quote both.
+  CANNOT_DETERMINE only if the reference contains no information at all relevant to this requirement.
+- OTHERWISE → CANNOT_DETERMINE.""",
+
+        "Feasible": """The requirement must be achievable within real-world constraints (cost, schedule, technical readiness).
+
+{ref_block}
+
+Check to perform:
+- IF reference documents are provided:
+  Read ALL sections looking for: technology stack, platform requirements, database type, operational limits, regulatory requirements, team/methodology constraints.
+  PASS (default) if the requirement does not conflict with any stated constraint; quote the most relevant constraint.
+  FAIL only if the requirement directly conflicts with a specific stated constraint; quote both the conflicting constraint and the problematic requirement text.
+  Do NOT return CANNOT_DETERMINE when constraints are present — use them to make a determination.
+- OTHERWISE → CANNOT_DETERMINE.""",
+
+        "Necessary": """A requirement is necessary only if it can be traced back to a stakeholder need, business goal, or objective, AND it has not become obsolete.
+
+{ref_block}
+
+Checks to perform:
+1. Traceability Check:
+   IF reference documents are provided:
+     Use BROAD matching — semantic alignment is sufficient (e.g., "user account management" matches "Managing user and group accounts and privileges").
+     PASS if the requirement addresses any need, goal, or capability described anywhere in the reference; quote the most relevant sentence.
+     FAIL if the requirement is completely outside the scope of the reference (potential gold-plating); explain.
+     Do NOT return CANNOT_DETERMINE just because there is no exact wording match.
+   OTHERWISE → CANNOT_DETERMINE.
+2. Expiration Check (always apply regardless of reference):
+   FAIL if the requirement contains time-bound language that may already be obsolete (e.g., past deadlines, discontinued systems, outdated standards).""",
+
+        "Singular": """One requirement must express exactly one capability, characteristic, constraint, or quality factor.
+
+Check to perform:
+- Conjunction Check: Scan for "and", "or", "and/or" (and their Thai equivalents: และ, หรือ, และ/หรือ).
+  If found linking two distinct capabilities or actions → FAIL; list each distinct capability that should be split into a separate requirement.
+  NOTE: conjunctions inside a single condition (e.g., "username and password") are acceptable — only FAIL when two independent capabilities are joined.""",
+
+        "Unambiguous": """The requirement must have exactly one valid interpretation.
+
+Check to perform:
+- Vague Words Check: Scan for the following categories and list every offending term:
+  • Superlatives: best, most, fastest, highest, lowest, optimal
+  • Subjective quality: user-friendly, easy to use, intuitive, cost-effective, simple, robust, flexible
+  • Vague adverbs/adjectives: almost always, significant, minimal, sufficient, appropriate, adequate, reasonable
+  • Loophole phrases: if possible, as appropriate, as applicable, where necessary, etc.
+FAIL if any such term is found; name each term and explain why it creates ambiguity.""",
+
+        "Verifiable": """The requirement must be written so that compliance can be tested or measured objectively.
+
+Checks to perform:
+1. Measurable Condition Check: FAIL if the requirement lacks numbers, units, thresholds, or observable conditions needed to write a test case.
+2. Open-ended Word Check: Scan for the following and FAIL if found; name each term:
+   • "provide support", "but not limited to", "as a minimum", "etc."
+   • Absolute universals that are untestable: "all", "every", "always", "never"
+   Explain why each term prevents objective verification.""",
+    }
+
+    def _analyze_single_criterion(
+        self,
+        criterion: str,
+        requirement: str,
+        req_id: str,
+        requirement_template: str = "Others",
+        reference_context: str = None,
+    ) -> Dict:
+        """Evaluate ONE ISO 29148 criterion for ONE requirement."""
+        # Build criterion-specific instruction (substitute placeholders)
+        instruction = self.CRITERION_INSTRUCTIONS[criterion]
+
+        ref_block = f"""Reference documents provided (use as ground truth):
+---
+{reference_context}
+---""" if reference_context else "No reference documents provided."
+
+        if criterion == "Conforming":
+            template_info = self.TEMPLATE_DEFINITIONS.get(requirement_template, self.TEMPLATE_DEFINITIONS["Others"])
+            instruction = instruction.format(
+                template_name=requirement_template,
+                template_patterns=template_info["patterns"],
+            )
+        elif "{ref_block}" in instruction:
+            instruction = instruction.format(ref_block=ref_block)
+
+        rules_reference = self._build_rules_reference(criterion)
+        extra_fields = '\n  "detected_pattern": "<pattern or null>",' if criterion == "Conforming" else ""
+
+        prompt = f"""You are an ISO/IEC/IEEE 29148 requirements quality expert.
+Evaluate the requirement below against the "{criterion}" criterion ONLY.
+Do NOT evaluate any other criterion.
+Do NOT assume missing information — mark CANNOT_DETERMINE when required context is absent.
+Respond in the SAME language as the requirement (Thai → Thai, English → English).
+
+Requirement: "{requirement}" (ID: {req_id})
+
+--- Criterion: {criterion} ---
+{instruction}
+{rules_reference}
+
+Return JSON only:
+{{
+  "criterion": "{criterion}",{extra_fields}
+  "status": "PASS" | "FAIL" | "CANNOT_DETERMINE",
+  "reason": "<FAIL: what is wrong | PASS: why it passes | CANNOT_DETERMINE: what context is missing>",
+  "cited_rules": ["<rule name>"]
+}}
+cited_rules must be a list of rule names from the reference above that apply to the finding (empty list [] if none apply or no rules reference was given)."""
+
         try:
             response = self.client.models.generate_content(
-                model= self.model,
+                model=self.model,
                 contents=prompt,
-                config= self.generation_config
+                config=self.generation_config,
             )
-            
             result_text = response.text.strip()
-            if not result_text:
-                raise ValueError("LLM returned empty response")
-
-            # Extract JSON
             if "```json" in result_text:
                 result_text = result_text.split("```json")[1].split("```")[0].strip()
             elif "```" in result_text:
                 result_text = result_text.split("```")[1].split("```")[0].strip()
-            
             data = json.loads(result_text)
-            
-            # Process results
-            passed_criteria = []
-            failed_evaluation = {}
-            total_score = 0
-            
-            for r in data['results']:
-                criterion = r.get('criterion', '')
-                is_passed = r.get('pass', False)
-                
-                if is_passed:
-                    passed_criteria.append(criterion)
-                    total_score += 1
-                else:
-                    # Store only reason (not suggestion) as string
-                    reason = r.get('reason', '')
-                    failed_evaluation[criterion] = reason if reason else "ไม่ผ่านเกณฑ์"
-            
             return {
-                "req_id": req_id,
-                "score": f"{total_score}/9",
-                "characteristics": passed_criteria,
-                "evaluation": failed_evaluation,  # JSON object
-                "detailed_results": data['results']
+                "criterion": criterion,
+                "status": data.get("status", "FAIL"),
+                "reason": data.get("reason", ""),
+                "cited_rules": data.get("cited_rules") or [],
+                "detected_pattern": data.get("detected_pattern"),
             }
         except Exception as e:
             return {
-                "req_id": req_id,
-                "score": "0/9",
-                "characteristics": "",
-                "evaluation": {"error": f"เกิดข้อผิดพลาด: {str(e)}"},
-                "detailed_results": []
+                "criterion": criterion,
+                "status": "FAIL",
+                "reason": f"เกิดข้อผิดพลาดในการประเมิน: {e}",
+                "cited_rules": [],
+                "detected_pattern": None,
             }
-    
-    async def analyze_requirements_parallel(
-        self, 
-        requirements: List[Dict],
-        progress_callback=None
+
+    def _analyze_single_requirement_all_criteria(
+        self,
+        requirement: str,
+        req_id: str,
+        requirement_template: str = "Others",
+        reference_context: str = None,
     ) -> Dict:
         """
-        Analyze requirements in parallel
+        Analyze ONE requirement against all 9 ISO 29148 criteria.
+        Each criterion is evaluated by a separate focused LLM call, all run in parallel.
+        """
+        criterion_results: Dict[str, Dict] = {}
+
+        with ThreadPoolExecutor(max_workers=9) as executor:
+            futures = {
+                executor.submit(
+                    self._analyze_single_criterion,
+                    criterion, requirement, req_id, requirement_template, reference_context,
+                ): criterion
+                for criterion in self.CRITERIA_NAMES
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                criterion_results[result["criterion"]] = result
+
+        # Rebuild in canonical order
+        results_list = [criterion_results[c] for c in self.CRITERIA_NAMES if c in criterion_results]
+
+        passed_criteria = []
+        failed_evaluation = {}
+        total_score = 0
+
+        for r in results_list:
+            criterion = r["criterion"]
+            status = r["status"]
+            reason = r.get("reason", "") or ""
+            cited_rules = r.get("cited_rules") or []
+
+            if status == "PASS":
+                passed_criteria.append(criterion)
+                total_score += 1
+            else:
+                if status == "CANNOT_DETERMINE":
+                    reason = f"[?] {reason}" if reason else "[?] ไม่สามารถประเมินได้เนื่องจากขาด context"
+                elif criterion == "Conforming":
+                    reason = f"[Template: {requirement_template}] {reason}"
+                failed_evaluation[criterion] = {
+                    "reason": reason or "ไม่ผ่านเกณฑ์",
+                    "cited_rules": cited_rules,
+                }
+
+        return {
+            "req_id": req_id,
+            "score": f"{total_score}/9",
+            "characteristics": passed_criteria,
+            "evaluation": failed_evaluation,
+            "detailed_results": results_list,
+        }
+    
+    async def analyze_requirements_parallel(
+        self,
+        requirements: List[Dict],
+        requirement_template: str = "Others",
+        progress_callback=None,
+        reference_context: str = None,
+    ) -> Dict:
+        """
+        Analyze requirements in parallel.
+        reference_context: extracted text from project reference files,
+        used as ground truth for Necessary, Feasible, and Correct criteria.
         """
         total = len(requirements)
         results = []
-        
+
         # Create async tasks
         loop = asyncio.get_event_loop()
-        
+
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all tasks
             futures = [
                 loop.run_in_executor(
                     executor,
                     self._analyze_single_requirement_all_criteria,
                     req['requirement'],
-                    req['req_id']
+                    req['req_id'],
+                    requirement_template,
+                    reference_context,
                 )
                 for req in requirements
             ]
@@ -164,7 +485,7 @@ class GeminiService:
                 
                 # Progress callback
                 if progress_callback:
-                    progress_callback(completed, total)
+                    await progress_callback(completed, total)
         
         # Calculate summary
         total_score_sum = sum(
@@ -185,13 +506,22 @@ class GeminiService:
         }
     
     def analyze_requirements_parallel_sync(
-        self, 
-        requirements: List[Dict]
+        self,
+        requirements: List[Dict],
+        requirement_template: str = "Others",
+        entity_level: str = None,
+        business_goals: str = None,
+        constraints: str = None,
     ) -> Dict:
         """
         Synchronous version for non-async contexts
         """
-        return asyncio.run(self.analyze_requirements_parallel(requirements))
+        return asyncio.run(self.analyze_requirements_parallel(
+            requirements, requirement_template,
+            entity_level=entity_level,
+            business_goals=business_goals,
+            constraints=constraints,
+        ))
     
     def _generate_recommendations(self, results: List[Dict]) -> str:
         """Generate recommendations based on results"""
@@ -230,13 +560,15 @@ class GeminiService:
     async def analyze_with_progress(
         self,
         requirements: List[Dict],
-        websocket=None
+        requirement_template: str = "Others",
+        websocket=None,
+        reference_context: str = None,
     ):
         """
         Analyze with real-time progress updates via WebSocket
         """
         total = len(requirements)
-        
+
         async def progress_callback(completed, total):
             if websocket:
                 await websocket.send_json({
@@ -245,10 +577,12 @@ class GeminiService:
                     "total": total,
                     "percentage": (completed / total) * 100
                 })
-        
+
         result = await self.analyze_requirements_parallel(
             requirements,
-            progress_callback=progress_callback
+            requirement_template,
+            progress_callback=progress_callback,
+            reference_context=reference_context,
         )
         
         if websocket:
@@ -260,67 +594,149 @@ class GeminiService:
         return result
     
     def _generate_suggestion_for_requirement(
-        self, 
+        self,
         req_id: str,
         requirement: str,
         evaluation: Dict[str, str],
-        module: str = None
+        module: str = None,
+        requirement_template: str = "Others",
     ) -> Dict:
         """
-        Generate improved requirement based on failed criteria
+        Generate improved requirement based on failed criteria.
+        Uses Gemini AI classification to find relevant ISO 29148 rules from DB.
         """
-        # Build context about failed criteria
+        # Helper: extract reason string from evaluation value (supports both str and {reason, cited_rules})
+        def _reason_str(v) -> str:
+            if isinstance(v, dict):
+                return v.get("reason", "") or ""
+            return str(v) if v else ""
+
+        # Split evaluation into actual FAILs vs CANNOT_DETERMINE (prefixed with "[?]")
+        actually_failed = {
+            k: v for k, v in evaluation.items()
+            if k != 'error' and not _reason_str(v).startswith('[?]')
+        }
+        cannot_determine = {
+            k: v for k, v in evaluation.items()
+            if k != 'error' and _reason_str(v).startswith('[?]')
+        }
+
+        # If nothing actually failed (all CANNOT_DETERMINE), nothing to improve
+        if not actually_failed:
+            return {
+                "req_id": req_id,
+                "is_split": False,
+                "suggested_requirement": requirement,
+                "split_requirements": None,
+                "improvements": {},
+                "explanation": "ไม่มี criteria ที่ FAIL จริง — criteria ที่ไม่ผ่านทั้งหมดเป็น CANNOT_DETERMINE เนื่องจากขาดข้อมูลอ้างอิง",
+                "success": True,
+            }
+
+        # Check if "Singular" is in actually failed criteria (not CANNOT_DETERMINE)
+        has_singular_failure = "Singular" in actually_failed
+
+        # Build context about actually failed criteria only
         failed_criteria_text = "\n".join([
-            f"- {criterion}: {reason}"
-            for criterion, reason in evaluation.items()
-            if criterion != 'error'
+            f"- {criterion}: {_reason_str(reason)}"
+            for criterion, reason in actually_failed.items()
         ])
-        
-        # Build criteria definitions for context
-        criteria_text = "\n".join([
-            f"{i+1}. {criterion}: {meaning}"
-            for i, (criterion, meaning) in enumerate(self.CRITERION_MEANING.items())
-        ])
-        
-        prompt = f"""Context: You're a software requirement expert specializing in ISO/IEC/IEEE 29148 standards.
 
-Task: Improve this requirement to pass ALL 9 quality criteria.
+        # Note about skipped CANNOT_DETERMINE criteria
+        cannot_determine_note = ""
+        if cannot_determine:
+            skipped = ", ".join(cannot_determine.keys())
+            cannot_determine_note = f"\nNOTE: The following criteria were CANNOT_DETERMINE during analysis (no reference documents available) and must NOT be modified or assumed: {skipped}. Leave them as-is."
 
-Requirement ID: {req_id}
-Module: {module or 'N/A'}
-Original Requirement: "{requirement}"
+        # Build rules reference for all failed criteria
+        all_failed_criteria = list(actually_failed.keys())
+        relevant_rule_names: List[str] = []
+        for c in all_failed_criteria:
+            for rn in self.RULES_BY_CRITERION.get(c, []):
+                if rn not in relevant_rule_names:
+                    relevant_rule_names.append(rn)
+        rules_lookup = {r["name"]: r for r in self.RULES}
+        suggestion_rules_block = ""
+        if relevant_rule_names:
+            lines = [f'- "{rn}" (§{rules_lookup[rn]["section"]}): {rules_lookup[rn]["description"]}'
+                     for rn in relevant_rule_names if rn in rules_lookup]
+            if lines:
+                suggestion_rules_block = "\nReference rules (cite in cited_rules per criterion):\n" + "\n".join(lines)
 
-Failed Criteria and Reasons:
+        # Build template context (patterns only — name/description not needed in prompt)
+        template_info = self.TEMPLATE_DEFINITIONS.get(requirement_template, self.TEMPLATE_DEFINITIONS["Others"])
+        template_patterns = template_info['patterns']
+
+        # EARS Thai translation hint — only relevant when template is EARS
+        ears_hint = ""
+        if requirement_template == "EARS":
+            ears_hint = "If writing in Thai, use EARS keywords: เมื่อ (WHEN), ในขณะที่ (WHILE), ถ้า (IF), ในกรณีที่ (WHERE), ต้อง (shall), ระบบ (system)."
+
+        # List other failing criteria besides Singular (for split case)
+        other_failed_criteria = {k: v for k, v in evaluation.items() if k != "Singular" and k != "error"}
+        other_failed_text = "\n".join([
+            f"  - {criterion}: {_reason_str(reason)}"
+            for criterion, reason in other_failed_criteria.items()
+        ]) if other_failed_criteria else "  (none)"
+
+        # Split vs rewrite instruction
+        singular_reason = _reason_str(evaluation.get("Singular", ""))
+        if has_singular_failure:
+            action_instruction = f"""ACTION: SPLIT
+The requirement mixes multiple capabilities. Split into one requirement per capability.
+Singular failure reason: "{singular_reason}"
+
+Split rules:
+- Produce MINIMUM 2 requirements; if only 1 is possible → set is_split:false and rewrite instead
+- Broad terms like "management/capabilities/operations" → split into standard CRUD-like sub-functions
+- Do NOT invent actors/triggers/mechanisms not stated; domain-standard sub-functions are allowed
+- Also fix these other failed criteria in EACH split: {other_failed_text if other_failed_text.strip() else "(none)"}
+- req_id format: {req_id}-1, {req_id}-2, ..."""
+        else:
+            action_instruction = "ACTION: REWRITE (do NOT split — is_split must be false)"
+
+        prompt = f"""You are a software requirement expert. Improve the requirement below to fix ALL listed failed criteria.
+
+Requirement: "{requirement}" (ID: {req_id}, Module: {module or 'N/A'})
+
+Failed criteria to fix:
 {failed_criteria_text}
+{cannot_determine_note}
+Template ({requirement_template}):
+{template_patterns}
+{action_instruction}
+{suggestion_rules_block}
+Constraints:
+- Fix ONLY what failed; preserve original intent and level of detail
+- Do NOT invent values, thresholds, timings, mechanisms, actors, or outcomes not in the original (e.g., do not add "15 minutes", "mouse input", "redirect to login")
+- If a criterion cannot be fixed without fabricating info, improve wording/structure only
+- Plain text output — no markdown, no bullet characters inside requirement text
+- Same language as original {ears_hint}
 
-ISO 29148 Quality Criteria Reference:
-{criteria_text}
-
-Instructions:
-1) Rewrite the requirement to address ALL failed criteria
-2) Keep the core intent and functionality of the original requirement
-3) Make it specific, measurable, and unambiguous
-4) Respond in Thai (technical terms can use English)
-5) Return strict JSON format:
-
+Return JSON only:
 {{
   "req_id": "{req_id}",
-  "suggested_requirement": "<improved requirement text in Thai>",
+  "is_split": true|false,
+  "suggested_requirement": "<plain text (when is_split=false, else null)>",
+  "split_requirements": [
+    {{
+      "req_id": "{req_id}-1",
+      "requirement": "<plain text, single capability>",
+      "module": "<module>"
+    }}
+  ],
   "improvements": {{
-    "criterion_name": "<explanation of what was fixed in Thai>",
-    ...for each failed criterion
+    "<criterion>": {{
+      "description": "<explanation of what was changed and why — e.g. 'Replaced \"will\" with \"shall\" to make the obligation mandatory. Restructured using EARS Event-driven pattern: WHEN [trigger], the system shall [action].' Do NOT include ISO section numbers or standard citations.>",
+      "cited_rules": ["<rule name>"]
+    }}
   }},
-  "explanation": "<brief overall explanation of changes in Thai>"
+  "explanation": "<brief overall summary>"
 }}
-
-Focus on making the requirement:
-- Clear and specific
-- Measurable and verifiable
-- Complete but not overly detailed
-- Singular (one requirement per statement)
-- Appropriate to the abstraction level
-
-Output: JSON only, no preamble."""
+split_requirements is null when is_split=false.
+cited_rules per improvement: list rule names from the reference above that motivated the fix (empty list [] if none apply).
+description per improvement: explain what was changed and why it fixes the issue. Do NOT mention ISO section numbers (§5.2.x) or standard names in the description text.
+Output JSON only."""
         
         try:
             response = self.client.models.generate_content(
@@ -340,18 +756,51 @@ Output: JSON only, no preamble."""
             data = json.loads(result_text)
             
             # Filter improvements to only include criteria that actually failed
+            # Normalise: LLM may return plain string or {description, cited_rules} dict
             all_improvements = data.get("improvements", {})
             failed_criteria_only = {}
-            
-            # Only keep improvements for criteria that are in the evaluation (failed)
             for criterion, improvement in all_improvements.items():
-                if criterion in evaluation:
-                    failed_criteria_only[criterion] = improvement
-            
+                if criterion not in evaluation:
+                    continue
+                if isinstance(improvement, dict):
+                    failed_criteria_only[criterion] = {
+                        "description": improvement.get("description", ""),
+                        "cited_rules": improvement.get("cited_rules") or [],
+                    }
+                else:
+                    # Fallback: plain string from older model response
+                    failed_criteria_only[criterion] = {
+                        "description": str(improvement),
+                        "cited_rules": [],
+                    }
+
+            # Check if requirement was split
+            is_split = data.get("is_split", False)
+            split_requirements = data.get("split_requirements") or None
+            suggested_requirement = data.get("suggested_requirement") or ""
+
+            # Server-side guard 1: if Singular passed, never allow split
+            if not has_singular_failure and is_split:
+                is_split = False
+                # Model wrongly returned splits — use first split as suggested_requirement fallback
+                if not suggested_requirement and split_requirements:
+                    suggested_requirement = split_requirements[0].get("requirement", "") or ""
+                split_requirements = None
+
+            # Server-side guard 2: split must produce at least 2 requirements
+            if is_split and (not split_requirements or len(split_requirements) < 2):
+                is_split = False
+                # Use the single split item's text as suggested_requirement fallback
+                if split_requirements and len(split_requirements) == 1:
+                    suggested_requirement = split_requirements[0].get("requirement", "") or suggested_requirement
+                split_requirements = None
+
             return {
                 "req_id": req_id,
-                "suggested_requirement": data.get("suggested_requirement", ""),
-                "improvements": failed_criteria_only,  # Only failed criteria
+                "is_split": is_split,
+                "suggested_requirement": suggested_requirement if not is_split else None,
+                "split_requirements": split_requirements if is_split else None,
+                "improvements": failed_criteria_only,
                 "explanation": data.get("explanation", ""),
                 "success": True
             }
@@ -359,7 +808,9 @@ Output: JSON only, no preamble."""
         except Exception as e:
             return {
                 "req_id": req_id,
+                "is_split": False,
                 "suggested_requirement": "",
+                "split_requirements": None,
                 "improvements": {},
                 "explanation": f"เกิดข้อผิดพลาด: {str(e)}",
                 "success": False,
@@ -415,7 +866,8 @@ Output: JSON only, no preamble."""
                     req['req_id'],
                     req['requirement'],
                     req.get('evaluation', {}),
-                    req.get('module')
+                    req.get('module'),
+                    req.get('requirement_template', 'Others')
                 )
                 for req in needs_improvement
             ]
@@ -429,7 +881,7 @@ Output: JSON only, no preamble."""
                 
                 # Progress callback
                 if progress_callback:
-                    progress_callback(completed, total)
+                    await progress_callback(completed, total)
         
         successful = sum(1 for r in results if r.get('success', False))
         
