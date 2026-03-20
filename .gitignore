@@ -1,4 +1,12 @@
 **/__pycache__/
 **/pgdata/
 .env
+.env.*
+!.env.example
 29148-2018-ISOIECIEEE.pdf
+venv/
+.venv/
+htmlcov/
+.pytest_cache/
+*.pyc
+*.pyo
