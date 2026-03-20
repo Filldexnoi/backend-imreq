@@ -1,0 +1,8 @@
+.venv/
+venv/
+env/
+__pycache__/
+.pytest_cache/
+.git/
+node_modules/  (ถ้าคุณเก็บ Vue ไว้ในโฟลเดอร์เดียวกัน)
+*.pyc
