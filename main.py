@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -66,9 +67,11 @@ def custom_openapi():
 app.openapi = custom_openapi
 
 # CORS middleware
+_cors_origins_env = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000")
+_cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
