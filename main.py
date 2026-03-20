@@ -661,13 +661,13 @@ def get_similarity_summary(
             "req_id": row.req_id,
             "original_score": row.original_score,
             "jaccard": j,
-            "doc2vec_sim": emb,
+            "tfidf_sim": emb,
             "interpretation": interpret(j, emb),
             "is_split": bool(row.is_split),
         })
 
     jaccards = [r["jaccard"] for r in results]
-    embeds = [r["doc2vec_sim"] for r in results]
+    embeds = [r["tfidf_sim"] for r in results]
 
     summary = {
         "total": n,
@@ -679,7 +679,7 @@ def get_similarity_summary(
             "min_req": results[int(np.argmin(jaccards))]["req_id"],
             "max_req": results[int(np.argmax(jaccards))]["req_id"],
         },
-        "doc2vec": {
+        "tfidf": {
             "mean": round(float(np.mean(embeds)), 4),
             "median": round(float(np.median(embeds)), 4),
             "min": round(float(np.min(embeds)), 4),

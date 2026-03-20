@@ -10,3 +10,4 @@ htmlcov/
 .pytest_cache/
 *.pyc
 *.pyo
+node_modules/
