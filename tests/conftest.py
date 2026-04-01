@@ -15,13 +15,13 @@ import unittest.mock as _mock
 for _mod in ["gensim", "gensim.models", "gensim.models.doc2vec",
              "torch", "sentence_transformers",
              "sklearn", "sklearn.metrics", "sklearn.metrics.pairwise",
-             "google", "google.genai"]:
+             "openai"]:
     if _mod not in sys.modules:
         sys.modules[_mod] = _mock.MagicMock()
 
 def _getenv_side_effect(key, *args):
     defaults = {
-        "GEMINI_API_KEY": "fake-api-key",
+        "OPENAI_API_KEY": "fake-api-key",
         "DATABASE_URL": "postgresql://fake:fake@localhost/fakedb",
     }
     return defaults.get(key, args[0] if args else None)

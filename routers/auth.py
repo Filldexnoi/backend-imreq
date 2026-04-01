@@ -58,7 +58,7 @@ async def login(login_data: schemas.LoginRequest, db: Session = Depends(get_db))
     Login with username and password
     Returns JWT access token
     """
-    user = authenticate_user(db, login_data.username, login_data.password)
+    user = authenticate_user(db, login_data.identifier, login_data.password)
     
     if not user:
         raise HTTPException(

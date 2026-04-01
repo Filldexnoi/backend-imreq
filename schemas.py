@@ -63,7 +63,7 @@ class TokenData(BaseModel):
     username: Optional[str] = None
 
 class LoginRequest(BaseModel):
-    username: str
+    identifier: str   # username or email
     password: str
 
 # Project Schemas

@@ -23,8 +23,7 @@ with _mock.patch.dict("sys.modules", {
     "gensim.models.doc2vec": _gensim_mock.models.doc2vec,
     "torch": _torch_mock,
     "sentence_transformers": _sentence_mock,
-    "google.genai": _mock.MagicMock(),
-    "google": _mock.MagicMock(),
+    "openai": _mock.MagicMock(),
 }):
     with _mock.patch("os.getenv", return_value="fake-api-key"):
         from services.gemini_service import GeminiService
@@ -33,7 +32,7 @@ with _mock.patch.dict("sys.modules", {
 @pytest.fixture
 def svc():
     with patch("os.getenv", return_value="fake-key"), \
-         patch("google.genai.Client"):
+         patch("services.gemini_service.OpenAI"):
         return GeminiService()
 
 
@@ -110,10 +109,14 @@ class TestBuildRulesReference:
 
 class TestAnalyzeSingleCriterion:
     def _mock_response(self, svc, json_text: str):
-        """Make svc.client.models.generate_content return json_text."""
+        """Make svc.client.chat.completions.create return json_text."""
+        msg = MagicMock()
+        msg.content = json_text
+        choice = MagicMock()
+        choice.message = msg
         mock_resp = MagicMock()
-        mock_resp.text = json_text
-        svc.client.models.generate_content.return_value = mock_resp
+        mock_resp.choices = [choice]
+        svc.client.chat.completions.create.return_value = mock_resp
 
     def test_pass_result(self, svc):
         self._mock_response(svc, '{"status": "PASS", "reason": "", "cited_rules": [], "detected_pattern": "ISO29148: Standard"}')
@@ -173,9 +176,13 @@ class TestSuggestionFiltering:
     """
 
     def _setup_suggestion_mock(self, svc, response_json: str):
+        msg = MagicMock()
+        msg.content = response_json
+        choice = MagicMock()
+        choice.message = msg
         mock_resp = MagicMock()
-        mock_resp.text = response_json
-        svc.client.models.generate_content.return_value = mock_resp
+        mock_resp.choices = [choice]
+        svc.client.chat.completions.create.return_value = mock_resp
 
     def test_all_cannot_determine_returns_no_change(self, svc):
         """If every failure is CANNOT_DETERMINE, no suggestion should be generated."""

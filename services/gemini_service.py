@@ -1,8 +1,9 @@
 import os
+import re
 import base64
 import io
 import logging
-from google import genai
+from openai import OpenAI
 from typing import Dict, List, Optional
 import json
 import asyncio
@@ -84,18 +85,23 @@ Example patterns:
     }
     
     def __init__(self, max_workers: int = 10):
-        api_key = os.getenv("GEMINI_API_KEY")
+        api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("GEMINI_API_KEY not found in environment variables")
+            raise ValueError("OPENAI_API_KEY not found in environment variables")
 
-        self.client = genai.Client(api_key=api_key)
-        self.model = 'gemini-2.0-flash-lite'
+        self.client = OpenAI(api_key=api_key)
+        self.model = 'gpt-5.4'
         self.max_workers = max_workers
-        self.generation_config =  {
-                "temperature": 0,
-                "top_p": 1,
-                "top_k": 1
+        self.generation_config = {
+            "temperature": 0,
         }
+
+    @staticmethod
+    def _detect_language(text: str) -> str:
+        """Return 'Thai' if text contains Thai characters, otherwise 'English'."""
+        if re.search(r'[\u0e00-\u0e7f]', text):
+            return "Thai"
+        return "English"
 
     def _extract_reference_text(self, reference_files: list) -> Optional[str]:
         """
@@ -337,11 +343,13 @@ Checks to perform:
         rules_reference = self._build_rules_reference(criterion)
         extra_fields = '\n  "detected_pattern": "<pattern or null>",' if criterion == "Conforming" else ""
 
+        req_lang = self._detect_language(requirement)
         prompt = f"""You are an ISO/IEC/IEEE 29148 requirements quality expert.
 Evaluate the requirement below against the "{criterion}" criterion ONLY.
 Do NOT evaluate any other criterion.
 Do NOT assume missing information — mark CANNOT_DETERMINE when required context is absent.
-Respond in the SAME language as the requirement (Thai → Thai, English → English).
+
+OUTPUT LANGUAGE: {req_lang}. The "reason" field MUST be written in {req_lang} only. Do not use any other language.
 
 Requirement: "{requirement}" (ID: {req_id})
 
@@ -359,12 +367,13 @@ Return JSON only:
 cited_rules must be a list of rule names from the reference above that apply to the finding (empty list [] if none apply or no rules reference was given)."""
 
         try:
-            response = self.client.models.generate_content(
+            response = self.client.chat.completions.create(
                 model=self.model,
-                contents=prompt,
-                config=self.generation_config,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.generation_config["temperature"],
+                response_format={"type": "json_object"},
             )
-            result_text = response.text.strip()
+            result_text = response.choices[0].message.content.strip()
             if "```json" in result_text:
                 result_text = result_text.split("```json")[1].split("```")[0].strip()
             elif "```" in result_text:
@@ -695,7 +704,13 @@ Split rules:
         else:
             action_instruction = "ACTION: REWRITE (do NOT split — is_split must be false)"
 
+        req_lang = self._detect_language(requirement)
+        lang_hint = f"If writing in Thai, use EARS keywords: เมื่อ (WHEN), ในขณะที่ (WHILE), ถ้า (IF), ในกรณีที่ (WHERE), ต้อง (shall), ระบบ (system)." if requirement_template == "EARS" and req_lang == "Thai" else ears_hint
+
         prompt = f"""You are a software requirement expert. Improve the requirement below to fix ALL listed failed criteria.
+
+OUTPUT LANGUAGE: {req_lang}. Every text field in your JSON response (suggested_requirement, requirement in split_requirements, description in improvements, explanation) MUST be written in {req_lang} only. Do not use any other language.
+{lang_hint}
 
 Requirement: "{requirement}" (ID: {req_id}, Module: {module or 'N/A'})
 
@@ -711,7 +726,7 @@ Constraints:
 - Do NOT invent values, thresholds, timings, mechanisms, actors, or outcomes not in the original (e.g., do not add "15 minutes", "mouse input", "redirect to login")
 - If a criterion cannot be fixed without fabricating info, improve wording/structure only
 - Plain text output — no markdown, no bullet characters inside requirement text
-- Same language as original {ears_hint}
+- All output text MUST be in {req_lang}
 
 Return JSON only:
 {{
@@ -739,20 +754,21 @@ description per improvement: explain what was changed and why it fixes the issue
 Output JSON only."""
         
         try:
-            response = self.client.models.generate_content(
+            response = self.client.chat.completions.create(
                 model=self.model,
-                contents=prompt,
-                config=self.generation_config
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.generation_config["temperature"],
+                response_format={"type": "json_object"},
             )
-            
-            result_text = response.text.strip()
-            
+
+            result_text = response.choices[0].message.content.strip()
+
             # Extract JSON
             if "```json" in result_text:
                 result_text = result_text.split("```json")[1].split("```")[0].strip()
             elif "```" in result_text:
                 result_text = result_text.split("```")[1].split("```")[0].strip()
-            
+
             data = json.loads(result_text)
             
             # Filter improvements to only include criteria that actually failed

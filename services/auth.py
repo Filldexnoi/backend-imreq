@@ -92,13 +92,13 @@ async def get_current_active_user(
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
 
-def authenticate_user(db: Session, username: str, password: str) -> Optional[models.User]:
-    """Authenticate user with username and password"""
-    user = db.query(models.User).filter(models.User.username == username).first()
-    
+def authenticate_user(db: Session, identifier: str, password: str) -> Optional[models.User]:
+    """Authenticate user with username or email and password"""
+    user = db.query(models.User).filter(models.User.username == identifier).first()
+    if not user:
+        user = db.query(models.User).filter(models.User.email == identifier).first()
     if not user:
         return None
     if not verify_password(password, user.hashed_password):
         return None
-    
     return user

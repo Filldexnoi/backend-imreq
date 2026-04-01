@@ -1,4 +1,5 @@
 import os
+import base64
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -8,6 +9,28 @@ from uuid import UUID
 import pandas as pd
 import io
 import json
+
+ALLOWED_REFERENCE_TYPES = {
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/plain",
+    "text/csv",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+ALLOWED_REFERENCE_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt", ".csv", ".xls", ".xlsx"}
+
+def _validate_reference_files(files: List[UploadFile]):
+    """Raise 400 if any file has an unsupported type."""
+    for file in files:
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        mime = (file.content_type or "").split(";")[0].strip()
+        if ext not in ALLOWED_REFERENCE_EXTENSIONS and mime not in ALLOWED_REFERENCE_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{file.filename}' has unsupported type. Allowed: PDF, DOC, DOCX, TXT, CSV, XLS, XLSX."
+            )
 import csv
 import uuid
 import re
@@ -122,16 +145,10 @@ async def create_project(
     # Handle file uploads - store as base64 in database
     reference_files = []
     if files:
-        import base64
-        
+        _validate_reference_files(files)
         for file in files:
-            # Read file content
             content = await file.read()
-            
-            # Convert to base64
             content_base64 = base64.b64encode(content).decode('utf-8')
-            
-            # Store file metadata with base64 content
             reference_files.append({
                 "name": file.filename,
                 "content": content_base64,
@@ -178,24 +195,17 @@ async def update_project_by_id(
     if requirement_template:
         model_update[models.Project.requirement_template] = requirement_template
     if files:
-        import base64
-        
+        _validate_reference_files(files)
         reference_files = []
         for file in files:
-            # Read file content
             content = await file.read()
-            
-            # Convert to base64
             content_base64 = base64.b64encode(content).decode('utf-8')
-            
-            # Store file metadata with base64 content
             reference_files.append({
                 "name": file.filename,
                 "content": content_base64,
                 "size": len(content),
                 "type": file.content_type or "application/octet-stream"
             })
-        
         model_update[models.Project.reference_files] = reference_files
 
     updated_rows = (
@@ -644,14 +654,15 @@ def get_similarity_summary(
     vectors = [model.infer_vector(tokens).reshape(1, -1) for tokens in all_tokens]
 
     def interpret(jaccard: float, emb: float) -> str:
-        if emb >= 0.95:
-            return 'เหมือนมาก'
-        elif emb >= 0.80:
-            return 'ความหมายใกล้เคียง'
-        elif emb >= 0.60:
-            return 'เปลี่ยนบางส่วน'
+        pct = emb * 100
+        if pct > 90:
+            return 'Almost identical'
+        elif pct > 70:
+            return 'High similarity'
+        elif pct > 50:
+            return 'Medium similarity'
         else:
-            return 'เปลี่ยนมาก'
+            return 'Low similarity'
 
     results = []
     for i, row in enumerate(rows):
@@ -689,7 +700,7 @@ def get_similarity_summary(
         },
         "interpretation_counts": {
             k: sum(1 for r in results if r["interpretation"] == k)
-            for k in ["เหมือนมาก", "ความหมายใกล้เคียง", "เปลี่ยนบางส่วน", "เปลี่ยนมาก"]
+            for k in ["Almost identical", "High similarity", "Medium similarity", "Low similarity"]
         },
     }
 
