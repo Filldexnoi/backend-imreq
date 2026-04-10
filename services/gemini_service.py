@@ -1,13 +1,12 @@
-import os
 import re
 import base64
 import io
 import logging
-from openai import OpenAI
 from typing import Dict, List, Optional
 import json
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from services.llm_provider import get_llm_provider, LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -85,16 +84,8 @@ Example patterns:
     }
     
     def __init__(self, max_workers: int = 10):
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY not found in environment variables")
-
-        self.client = OpenAI(api_key=api_key)
-        self.model = 'gpt-5.4'
+        self.llm: LLMProvider = get_llm_provider()
         self.max_workers = max_workers
-        self.generation_config = {
-            "temperature": 0,
-        }
 
     @staticmethod
     def _detect_language(text: str) -> str:
@@ -367,13 +358,7 @@ Return JSON only:
 cited_rules must be a list of rule names from the reference above that apply to the finding (empty list [] if none apply or no rules reference was given)."""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.generation_config["temperature"],
-                response_format={"type": "json_object"},
-            )
-            result_text = response.choices[0].message.content.strip()
+            result_text = self.llm.generate_json(prompt)
             if "```json" in result_text:
                 result_text = result_text.split("```json")[1].split("```")[0].strip()
             elif "```" in result_text:
@@ -754,14 +739,7 @@ description per improvement: explain what was changed and why it fixes the issue
 Output JSON only."""
         
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.generation_config["temperature"],
-                response_format={"type": "json_object"},
-            )
-
-            result_text = response.choices[0].message.content.strip()
+            result_text = self.llm.generate_json(prompt)
 
             # Extract JSON
             if "```json" in result_text:

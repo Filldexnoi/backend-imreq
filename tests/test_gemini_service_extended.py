@@ -25,23 +25,16 @@ from services.gemini_service import GeminiService
 
 @pytest.fixture
 def svc():
-    """GeminiService with mocked OpenAI client."""
-    with patch("os.getenv", return_value="fake-key"), \
-         patch("services.gemini_service.OpenAI") as mock_openai:
-        mock_openai.return_value = MagicMock()
+    """GeminiService with mocked LLM provider."""
+    mock_llm = MagicMock()
+    with patch("services.gemini_service.get_llm_provider", return_value=mock_llm):
         s = GeminiService(max_workers=2)
     return s
 
 
 def _fake_response(text: str):
-    """Simulate OpenAI chat completion response."""
-    msg = MagicMock()
-    msg.content = text
-    choice = MagicMock()
-    choice.message = msg
-    r = MagicMock()
-    r.choices = [choice]
-    return r
+    """Return text directly — llm.generate_json returns a string."""
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +43,7 @@ def _fake_response(text: str):
 
 class TestInit:
     def test_missing_api_key_raises(self):
-        with patch("services.gemini_service.os.getenv", return_value=None):
+        with patch("services.gemini_service.get_llm_provider", side_effect=ValueError("OPENAI_API_KEY not found")):
             with pytest.raises(ValueError, match="OPENAI_API_KEY"):
                 GeminiService()
 
@@ -179,7 +172,7 @@ class TestBuildRulesReference:
 
 class TestAnalyzeSingleCriterion:
     def _mock_response(self, svc, text):
-        svc.client.chat.completions.create.return_value = _fake_response(text)
+        svc.llm.generate_json.return_value = _fake_response(text)
 
     def test_plain_json_response(self, svc):
         payload = json.dumps({
@@ -209,7 +202,7 @@ class TestAnalyzeSingleCriterion:
         assert result["status"] == "FAIL"
 
     def test_exception_returns_fail(self, svc):
-        svc.client.chat.completions.create.side_effect = Exception("API down")
+        svc.llm.generate_json.side_effect = Exception("API down")
         result = svc._analyze_single_criterion("Verifiable", "Shall respond quickly.", "REQ-004")
         assert result["status"] == "FAIL"
         assert "criterion" in result
@@ -365,7 +358,7 @@ class TestGenerateRecommendations:
 
 class TestGenerateSuggestionForRequirement:
     def _mock_llm(self, svc, payload: dict):
-        svc.client.chat.completions.create.return_value = _fake_response(json.dumps(payload))
+        svc.llm.generate_json.return_value = _fake_response(json.dumps(payload))
 
     def test_all_cannot_determine_returns_original(self, svc):
         evaluation = {
@@ -464,7 +457,7 @@ class TestGenerateSuggestionForRequirement:
 
     def test_exception_returns_error(self, svc):
         evaluation = {"Unambiguous": {"reason": "vague", "cited_rules": []}}
-        svc.client.chat.completions.create.side_effect = Exception("Network error")
+        svc.llm.generate_json.side_effect = Exception("Network error")
         result = svc._generate_suggestion_for_requirement(
             "REQ-001", "Shall be good.", evaluation
         )
@@ -480,7 +473,7 @@ class TestGenerateSuggestionForRequirement:
             "improvements": {"Complete": {"description": "Added action.", "cited_rules": []}},
             "explanation": "Fixed."
         }
-        svc.client.chat.completions.create.return_value = _fake_response(
+        svc.llm.generate_json.return_value = _fake_response(
             f"```json\n{json.dumps(payload)}\n```"
         )
         result = svc._generate_suggestion_for_requirement("REQ-001", "System shall.", evaluation)

@@ -14,7 +14,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import unittest.mock as _mock
 for _mod in ["gensim", "gensim.models", "gensim.models.doc2vec",
              "torch", "sentence_transformers",
+             "pythainlp", "pythainlp.tokenize",
+             "rapidfuzz", "rapidfuzz.fuzz",
              "sklearn", "sklearn.metrics", "sklearn.metrics.pairwise",
+             "sklearn.feature_extraction", "sklearn.feature_extraction.text",
              "openai"]:
     if _mod not in sys.modules:
         sys.modules[_mod] = _mock.MagicMock()

@@ -35,9 +35,35 @@ import csv
 import uuid
 import re
 import numpy as np
-import gensim
-import gensim.models.doc2vec
 from sklearn.metrics.pairwise import cosine_similarity as cosine_sim
+
+# Lazy-loaded SBERT model (loaded once on first use)
+_sbert_model = None
+
+def _get_sbert():
+    global _sbert_model
+    if _sbert_model is None:
+        from sentence_transformers import SentenceTransformer
+        _sbert_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+    return _sbert_model
+
+def _is_thai(text: str) -> bool:
+    return bool(re.search(r'[\u0e00-\u0e7f]', text or ''))
+
+def _tokenize_thai(text: str) -> list:
+    from pythainlp.tokenize import word_tokenize
+    tokens = word_tokenize((text or '').lower(), engine='newmm')
+    return [t for t in tokens if t.strip()]
+
+def _tokenize_en(text: str) -> list:
+    return re.findall(r'[\w]+', (text or '').lower())
+
+def _jaccard(x: list, y: list) -> float:
+    sx, sy = set(x), set(y)
+    if not sx and not sy:
+        return 1.0
+    union = sx | sy
+    return len(sx & sy) / len(union) if union else 0.0
 
 from database import engine, get_db, Base
 import models
@@ -618,42 +644,58 @@ def get_similarity_summary(
     if not rows:
         raise HTTPException(status_code=404, detail="No suggested requirements found")
 
-    def tokenize(text: str) -> list:
-        return re.findall(r'[\w\u0E00-\u0E7F]+', (text or '').lower())
-
-    def jaccard_similarity(x, y):
-        sx, sy = set(x), set(y)
-        if not sx and not sy:
-            return 1.0
-        union = sx | sy
-        if not union:
-            return 0.0
-        return len(sx & sy) / len(union)
-
     def get_suggested_text(row) -> str:
         if row.is_split and row.split_requirements:
             return ' '.join(s.get('requirement', '') for s in row.split_requirements)
         return row.suggested_requirement or ''
 
-    orig_tokens = [tokenize(r.original_requirement) for r in rows]
-    sugg_tokens = [tokenize(get_suggested_text(r)) for r in rows]
+    orig_texts = [r.original_requirement or '' for r in rows]
+    sugg_texts = [get_suggested_text(r) for r in rows]
 
-    # Train Doc2Vec on combined corpus
-    all_tokens = orig_tokens + sugg_tokens
+    pair_is_thai = [_is_thai(o) or _is_thai(s) for o, s in zip(orig_texts, sugg_texts)]
 
-    def tagged_documents(token_lists):
-        for i, tokens in enumerate(token_lists):
-            yield gensim.models.doc2vec.TaggedDocument(tokens, [i])
+    # Text similarity: RapidFuzz for Thai, Jaccard for English
+    def text_sim(orig: str, sugg: str, thai: bool) -> float:
+        if thai:
+            from rapidfuzz.fuzz import token_set_ratio
+            return round(token_set_ratio(orig, sugg) / 100.0, 4)
+        return round(_jaccard(_tokenize_en(orig), _tokenize_en(sugg)), 4)
 
-    training_data = list(tagged_documents(all_tokens))
-    model = gensim.models.doc2vec.Doc2Vec(vector_size=40, min_count=1, epochs=60)
-    model.build_vocab(training_data)
-    model.train(training_data, total_examples=model.corpus_count, epochs=model.epochs)
+    # Semantic similarity: SBERT for Thai, Doc2Vec for English
+    thai_indices = [i for i, t in enumerate(pair_is_thai) if t]
+    en_indices   = [i for i, t in enumerate(pair_is_thai) if not t]
 
-    n = len(rows)
-    vectors = [model.infer_vector(tokens).reshape(1, -1) for tokens in all_tokens]
+    sem_scores = {}
 
-    def interpret(jaccard: float, emb: float) -> str:
+    # Thai → SBERT
+    if thai_indices:
+        sbert = _get_sbert()
+        thai_origs = [orig_texts[i] for i in thai_indices]
+        thai_suggs = [sugg_texts[i] for i in thai_indices]
+        embs = sbert.encode(thai_origs + thai_suggs, show_progress_bar=False)
+        nt = len(thai_indices)
+        for k, idx in enumerate(thai_indices):
+            sim = float(cosine_sim([embs[k]], [embs[nt + k]])[0][0])
+            sem_scores[idx] = round(max(0.0, sim), 4)
+
+    # English → Doc2Vec
+    if en_indices:
+        import gensim.models.doc2vec as _d2v
+        en_origs_tok = [_tokenize_en(orig_texts[i]) for i in en_indices]
+        en_suggs_tok = [_tokenize_en(sugg_texts[i]) for i in en_indices]
+        all_tok = en_origs_tok + en_suggs_tok
+        tagged = [_d2v.TaggedDocument(tok, [j]) for j, tok in enumerate(all_tok)]
+        model = _d2v.Doc2Vec(vector_size=40, min_count=1, epochs=60)
+        model.build_vocab(tagged)
+        model.train(tagged, total_examples=model.corpus_count, epochs=model.epochs)
+        ne = len(en_indices)
+        for k, idx in enumerate(en_indices):
+            v_orig = model.infer_vector(en_origs_tok[k]).reshape(1, -1)
+            v_sugg = model.infer_vector(en_suggs_tok[k]).reshape(1, -1)
+            sim = float(cosine_sim(v_orig, v_sugg)[0][0])
+            sem_scores[idx] = round(max(0.0, sim), 4)
+
+    def interpret(emb: float) -> str:
         pct = emb * 100
         if pct > 90:
             return 'Almost identical'
@@ -666,14 +708,14 @@ def get_similarity_summary(
 
     results = []
     for i, row in enumerate(rows):
-        j = round(jaccard_similarity(orig_tokens[i], sugg_tokens[i]), 4)
-        emb = round(float(cosine_sim(vectors[i], vectors[n + i])[0][0]), 4)
+        j = text_sim(orig_texts[i], sugg_texts[i], pair_is_thai[i])
+        emb = sem_scores[i]
         results.append({
             "req_id": row.req_id,
             "original_score": row.original_score,
             "jaccard": j,
             "tfidf_sim": emb,
-            "interpretation": interpret(j, emb),
+            "interpretation": interpret(emb),
             "is_split": bool(row.is_split),
         })
 
@@ -681,7 +723,7 @@ def get_similarity_summary(
     embeds = [r["tfidf_sim"] for r in results]
 
     summary = {
-        "total": n,
+        "total": len(rows),
         "jaccard": {
             "mean": round(float(np.mean(jaccards)), 4),
             "median": round(float(np.median(jaccards)), 4),

@@ -238,34 +238,27 @@ class TestSimilarityEndpoint:
         assert "No suggested requirements" in resp.json()["detail"]
 
     def test_similarity_success(self, client, mock_db, mock_user):
-        """Test with fully mocked gensim Doc2Vec and numpy."""
+        """English text → Doc2Vec path; Thai text → SBERT path."""
+        import numpy as np
         pid = uuid.uuid4()
         self._setup_similarity_mocks(mock_db, mock_user, pid)
 
-        import numpy as np
+        # English pairs → Doc2Vec mock
+        fake_vec = np.random.rand(40).astype(np.float32)
+        mock_d2v_model = MagicMock()
+        mock_d2v_model.infer_vector.return_value = fake_vec
+        mock_d2v_model.corpus_count = 4
+        mock_d2v_model.epochs = 60
 
-        # Mock gensim Doc2Vec
-        fake_vec = MagicMock()
-        fake_vec.reshape.return_value = MagicMock()
-        mock_model = MagicMock()
-        mock_model.infer_vector.return_value = fake_vec
-        mock_model.corpus_count = 4
-        mock_model.epochs = 60
-
-        # cosine_sim mock — return 2D array-like
-        fake_cosine = MagicMock()
-        fake_cosine.__getitem__ = lambda self, key: [0.85]
-
-        with patch("main.gensim.models.doc2vec.TaggedDocument", return_value=MagicMock()), \
-             patch("main.gensim.models.doc2vec.Doc2Vec", return_value=mock_model), \
-             patch("main.cosine_sim") as mock_cosine, \
+        with patch("main.cosine_sim", return_value=np.array([[0.85]])), \
              patch("main.np.mean", return_value=np.float64(0.8)), \
              patch("main.np.median", return_value=np.float64(0.8)), \
              patch("main.np.min", return_value=np.float64(0.7)), \
              patch("main.np.max", return_value=np.float64(0.9)), \
              patch("main.np.argmin", return_value=0), \
-             patch("main.np.argmax", return_value=1):
-            mock_cosine.return_value = [[0.85]]
+             patch("main.np.argmax", return_value=1), \
+             patch("gensim.models.doc2vec.TaggedDocument", side_effect=lambda tok, tag: MagicMock()), \
+             patch("gensim.models.doc2vec.Doc2Vec", return_value=mock_d2v_model):
             resp = client.get(f"/api/projects/{pid}/suggestedrequirements/similarity")
 
         assert resp.status_code == 200

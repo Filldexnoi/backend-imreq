@@ -31,9 +31,10 @@ with _mock.patch.dict("sys.modules", {
 
 @pytest.fixture
 def svc():
-    with patch("os.getenv", return_value="fake-key"), \
-         patch("services.gemini_service.OpenAI"):
-        return GeminiService()
+    mock_llm = MagicMock()
+    with patch("services.gemini_service.get_llm_provider", return_value=mock_llm):
+        s = GeminiService()
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -109,14 +110,7 @@ class TestBuildRulesReference:
 
 class TestAnalyzeSingleCriterion:
     def _mock_response(self, svc, json_text: str):
-        """Make svc.client.chat.completions.create return json_text."""
-        msg = MagicMock()
-        msg.content = json_text
-        choice = MagicMock()
-        choice.message = msg
-        mock_resp = MagicMock()
-        mock_resp.choices = [choice]
-        svc.client.chat.completions.create.return_value = mock_resp
+        svc.llm.generate_json.return_value = json_text
 
     def test_pass_result(self, svc):
         self._mock_response(svc, '{"status": "PASS", "reason": "", "cited_rules": [], "detected_pattern": "ISO29148: Standard"}')
@@ -176,13 +170,7 @@ class TestSuggestionFiltering:
     """
 
     def _setup_suggestion_mock(self, svc, response_json: str):
-        msg = MagicMock()
-        msg.content = response_json
-        choice = MagicMock()
-        choice.message = msg
-        mock_resp = MagicMock()
-        mock_resp.choices = [choice]
-        svc.client.chat.completions.create.return_value = mock_resp
+        svc.llm.generate_json.return_value = response_json
 
     def test_all_cannot_determine_returns_no_change(self, svc):
         """If every failure is CANNOT_DETERMINE, no suggestion should be generated."""
