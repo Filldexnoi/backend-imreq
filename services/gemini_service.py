@@ -584,7 +584,7 @@ cited_rules must be a list of rule names from the reference above that apply to 
 
         async def heartbeat():
             while not heartbeat_stop.is_set():
-                await asyncio.sleep(25)
+                await asyncio.sleep(10)
                 if not heartbeat_stop.is_set():
                     await safe_send({"type": "heartbeat"})
 
