@@ -563,28 +563,49 @@ cited_rules must be a list of rule names from the reference above that apply to 
         """
         total = len(requirements)
 
-        async def progress_callback(completed, total):
-            if websocket:
-                await websocket.send_json({
-                    "type": "progress",
-                    "completed": completed,
-                    "total": total,
-                    "percentage": (completed / total) * 100
-                })
+        import asyncio
 
-        result = await self.analyze_requirements_parallel(
-            requirements,
-            requirement_template,
-            progress_callback=progress_callback,
-            reference_context=reference_context,
-        )
-        
-        if websocket:
-            await websocket.send_json({
-                "type": "complete",
-                "result": result
+        async def safe_send(data: dict) -> None:
+            if websocket:
+                try:
+                    await websocket.send_json(data)
+                except Exception:
+                    pass
+
+        async def progress_callback(completed, total):
+            await safe_send({
+                "type": "progress",
+                "completed": completed,
+                "total": total,
+                "percentage": (completed / total) * 100
             })
-        
+
+        heartbeat_stop = asyncio.Event()
+
+        async def heartbeat():
+            while not heartbeat_stop.is_set():
+                await asyncio.sleep(25)
+                if not heartbeat_stop.is_set():
+                    await safe_send({"type": "heartbeat"})
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+        try:
+            result = await self.analyze_requirements_parallel(
+                requirements,
+                requirement_template,
+                progress_callback=progress_callback,
+                reference_context=reference_context,
+            )
+        finally:
+            heartbeat_stop.set()
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+        await safe_send({"type": "complete", "result": result})
+
         return result
     
     def _generate_suggestion_for_requirement(
@@ -908,24 +929,26 @@ Output JSON only."""
         """
         Generate suggestions with real-time progress updates via WebSocket
         """
-        async def progress_callback(completed, total):
+        async def safe_send(data: dict) -> None:
             if websocket:
-                await websocket.send_json({
-                    "type": "progress",
-                    "completed": completed,
-                    "total": total,
-                    "percentage": (completed / total) * 100
-                })
-        
+                try:
+                    await websocket.send_json(data)
+                except Exception:
+                    pass
+
+        async def progress_callback(completed, total):
+            await safe_send({
+                "type": "progress",
+                "completed": completed,
+                "total": total,
+                "percentage": (completed / total) * 100
+            })
+
         result = await self.generate_suggestions_parallel(
             analyzed_requirements,
             progress_callback=progress_callback
         )
-        
-        if websocket:
-            await websocket.send_json({
-                "type": "complete",
-                "result": result
-            })
-        
+
+        await safe_send({"type": "complete", "result": result})
+
         return result

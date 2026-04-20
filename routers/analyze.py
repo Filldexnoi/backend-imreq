@@ -430,8 +430,12 @@ async def analyze_with_progress(
     except WebSocketDisconnect:
         logger.info("WebSocket: Client disconnected")
     except Exception as e:
-        logger.error(f"WebSocket error: {str(e)}")
-        await _safe_send(websocket, {"type": "error", "message": str(e)})
+        msg = str(e)
+        if "close frame" in msg or "ConnectionClosed" in type(e).__name__:
+            logger.info("WebSocket: Connection closed by client")
+        else:
+            logger.error(f"WebSocket error: {msg}")
+            await _safe_send(websocket, {"type": "error", "message": msg})
     finally:
         try:
             await websocket.close()
