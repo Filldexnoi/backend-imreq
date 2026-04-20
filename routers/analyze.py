@@ -291,6 +291,15 @@ async def analyze_single_requirement_detailed(
         logger.error(f"Analysis failed for req_id {origin_req.req_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
+async def _safe_send(websocket: WebSocket, data: dict) -> bool:
+    """Send JSON on websocket, return False if connection is already closed."""
+    try:
+        await websocket.send_json(data)
+        return True
+    except Exception:
+        return False
+
+
 @router.websocket("/projects/{project_id}/requirements/ws")
 async def analyze_with_progress(
     websocket: WebSocket,
@@ -309,11 +318,7 @@ async def analyze_with_progress(
         ).first()
 
         if not project:
-            await websocket.send_json({
-                "type": "error",
-                "message": "Project not found"
-            })
-            await websocket.close()
+            await _safe_send(websocket, {"type": "error", "message": "Project not found"})
             return
 
         requirement_template = project.requirement_template or "Others"
@@ -330,15 +335,11 @@ async def analyze_with_progress(
         origin_requirements = db.query(models.OriginRequirement)\
             .filter(models.OriginRequirement.project_id == project_id)\
             .all()
-        
+
         if not origin_requirements:
-            await websocket.send_json({
-                "type": "error",
-                "message": "No requirements found"
-            })
-            await websocket.close()
+            await _safe_send(websocket, {"type": "error", "message": "No requirements found"})
             return
-        
+
         # Remove duplicates based on req_id
         seen_req_ids = set()
         req_data = []
@@ -363,10 +364,7 @@ async def analyze_with_progress(
         db.close()
 
         # Send start message
-        await websocket.send_json({
-            "type": "start",
-            "total": len(req_data)
-        })
+        await _safe_send(websocket, {"type": "start", "total": len(req_data)})
 
         # Analyze with progress updates — no DB connection held here
         result = await gemini_service.analyze_with_progress(
@@ -424,21 +422,21 @@ async def analyze_with_progress(
         finally:
             db_save.close()
 
-        await websocket.send_json({
+        await _safe_send(websocket, {
             "type": "saved",
             "message": f"Saved {len(saved_req_ids)} analyzed requirements to database"
         })
-        
+
     except WebSocketDisconnect:
         logger.info("WebSocket: Client disconnected")
     except Exception as e:
         logger.error(f"WebSocket error: {str(e)}")
-        await websocket.send_json({
-            "type": "error",
-            "message": str(e)
-        })
+        await _safe_send(websocket, {"type": "error", "message": str(e)})
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 # Debug endpoint to check database state
 @router.get("/projects/{project_id}/requirements/debug")
