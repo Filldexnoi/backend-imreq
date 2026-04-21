@@ -427,23 +427,24 @@ async def create_origin_requirement(
 
     for row in reader:
         try:
-            # Requirement is required
-            requirement_text = row.get(mapping_obj.requirement)
+            # Skip rows where requirement column is empty or whitespace-only
+            requirement_text = (row.get(mapping_obj.requirement) or "").strip()
             if not requirement_text:
-                raise HTTPException(400, f"Row {row_number}: requirement column '{mapping_obj.requirement}' is empty")
-            
+                row_number += 1
+                continue
+
             # req_id: use from CSV if provided, otherwise auto-generate
-            if mapping_obj.req_id and mapping_obj.req_id in row and row[mapping_obj.req_id]:
-                req_id = row[mapping_obj.req_id]
+            if mapping_obj.req_id and mapping_obj.req_id in row and (row[mapping_obj.req_id] or "").strip():
+                req_id = row[mapping_obj.req_id].strip()
             else:
                 req_id = f"REQ-{row_number}"
-            
+
             # module: use from CSV if provided, otherwise empty string
             if mapping_obj.module and mapping_obj.module in row:
-                module = row[mapping_obj.module] or ""
+                module = (row[mapping_obj.module] or "").strip()
             else:
                 module = ""
-            
+
             rows.append({
                 "req_id": req_id,
                 "module": module,

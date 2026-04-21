@@ -711,12 +711,30 @@ Split rules:
             action_instruction = "ACTION: REWRITE (do NOT split — is_split must be false)"
 
         req_lang = self._detect_language(requirement)
-        lang_hint = f"If writing in Thai, use EARS keywords: เมื่อ (WHEN), ในขณะที่ (WHILE), ถ้า (IF), ในกรณีที่ (WHERE), ต้อง (shall), ระบบ (system)." if requirement_template == "EARS" and req_lang == "Thai" else ears_hint
+        if req_lang == "Thai":
+            if requirement_template == "EARS":
+                lang_hint = "If writing in Thai, use EARS keywords: เมื่อ (WHEN), ในขณะที่ (WHILE), ถ้า (IF), ในกรณีที่ (WHERE), ต้อง (shall), ระบบ (system)."
+            elif requirement_template == "ISO29148":
+                lang_hint = (
+                    "IMPORTANT: The requirement is in Thai. Do NOT use English words like 'shall', 'should', 'must', 'will' in the output. "
+                    "Replace them with Thai equivalents: 'shall' → 'ต้อง', 'should' → 'ควร'. "
+                    "Write the entire suggested_requirement in Thai only."
+                )
+            else:
+                lang_hint = "IMPORTANT: The requirement is in Thai. Write the entire suggested_requirement in Thai only. Do not include any English words in the requirement text."
+        else:
+            lang_hint = ears_hint
+
+        no_english_in_req = (
+            "\nCRITICAL: The suggested_requirement and all requirement text MUST be written entirely in Thai. "
+            "Do NOT insert any English words (including 'shall', 'should', 'must', 'will', 'WHEN', 'WHILE', 'IF', 'WHERE') into the requirement text. "
+            "Use only Thai vocabulary."
+        ) if req_lang == "Thai" else ""
 
         prompt = f"""You are a software requirement expert. Improve the requirement below to fix ALL listed failed criteria.
 
 OUTPUT LANGUAGE: {req_lang}. Every text field in your JSON response (suggested_requirement, requirement in split_requirements, description in improvements, explanation) MUST be written in {req_lang} only. Do not use any other language.
-{lang_hint}
+{lang_hint}{no_english_in_req}
 
 Requirement: "{requirement}" (ID: {req_id}, Module: {module or 'N/A'})
 
