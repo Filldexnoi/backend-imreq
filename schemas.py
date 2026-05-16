@@ -74,17 +74,20 @@ class ProjectBase(BaseModel):
 class ProjectCreate(ProjectBase):
     requirement_template: Optional[str] = "Others"
     reference_files: Optional[List[Dict[str, Any]]] = None
+    enabled_criteria: Optional[List[str]] = None
 
 class ProjectUpdate(ProjectBase):
     title: Optional[str] = None
     description: Optional[str] = None
     requirement_template: Optional[str] = None
     reference_files: Optional[List[Dict[str, Any]]] = None
+    enabled_criteria: Optional[List[str]] = None
 
 class Project(ProjectBase):
     id: UUID
     requirement_template: Optional[str] = None
     reference_files: Optional[List[Dict[str, Any]]] = None
+    enabled_criteria: Optional[List[str]] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 

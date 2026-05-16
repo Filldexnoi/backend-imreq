@@ -4,7 +4,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import asc
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 import pandas as pd
 import io
@@ -37,8 +37,9 @@ import re
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity as cosine_sim
 
-# Lazy-loaded SBERT model (loaded once on first use)
+# Lazy-loaded SBERT models (loaded once on first use)
 _sbert_model = None
+_sbert_en_model = None
 
 def _get_sbert():
     global _sbert_model
@@ -46,6 +47,13 @@ def _get_sbert():
         from sentence_transformers import SentenceTransformer
         _sbert_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
     return _sbert_model
+
+def _get_sbert_en():
+    global _sbert_en_model
+    if _sbert_en_model is None:
+        from sentence_transformers import SentenceTransformer
+        _sbert_en_model = SentenceTransformer('all-MiniLM-L6-v2')
+    return _sbert_en_model
 
 def _is_thai(text: str) -> bool:
     return bool(re.search(r'[\u0e00-\u0e7f]', text or ''))
@@ -73,6 +81,17 @@ from services.auth import get_current_active_user
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
+
+# Runtime migration: add enabled_criteria column if not present
+try:
+    from sqlalchemy import text as _text
+    with engine.connect() as _conn:
+        _conn.execute(_text(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS enabled_criteria JSON"
+        ))
+        _conn.commit()
+except Exception:
+    pass
 
 app = FastAPI(title="ImReq API", version="1.0.0")
 
@@ -164,6 +183,7 @@ async def create_project(
     title: str = Form(...),
     description: str = Form(...),
     requirement_template: str = Form("Others"),
+    enabled_criteria: Optional[str] = Form(None),
     files: List[UploadFile] = File(None),
     current_user: models.User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
@@ -181,14 +201,17 @@ async def create_project(
                 "size": len(content),
                 "type": file.content_type or "application/octet-stream"
             })
-    
+
+    criteria_list = json.loads(enabled_criteria) if enabled_criteria else None
+
     # Create project
     db_project = models.Project(
         user_id=current_user.id,
         title=title,
         description=description,
         requirement_template=requirement_template,
-        reference_files=reference_files if reference_files else None
+        reference_files=reference_files if reference_files else None,
+        enabled_criteria=criteria_list,
     )
     db.add(db_project)
     db.commit()
@@ -201,6 +224,7 @@ async def update_project_by_id(
     title: str = Form(None),
     description: str = Form(None),
     requirement_template: str = Form(None),
+    enabled_criteria: Optional[str] = Form(None),
     files: List[UploadFile] = File(None),
     current_user: models.User = Depends(get_current_active_user), db: Session = Depends(get_db)):
 
@@ -233,6 +257,8 @@ async def update_project_by_id(
                 "type": file.content_type or "application/octet-stream"
             })
         model_update[models.Project.reference_files] = reference_files
+    if enabled_criteria is not None:
+        model_update[models.Project.enabled_criteria] = json.loads(enabled_criteria)
 
     updated_rows = (
     db.query(models.Project)
@@ -679,21 +705,15 @@ def get_similarity_summary(
             sim = float(cosine_sim([embs[k]], [embs[nt + k]])[0][0])
             sem_scores[idx] = round(max(0.0, sim), 4)
 
-    # English → Doc2Vec
+    # English → SBERT (all-MiniLM-L6-v2)
     if en_indices:
-        import gensim.models.doc2vec as _d2v
-        en_origs_tok = [_tokenize_en(orig_texts[i]) for i in en_indices]
-        en_suggs_tok = [_tokenize_en(sugg_texts[i]) for i in en_indices]
-        all_tok = en_origs_tok + en_suggs_tok
-        tagged = [_d2v.TaggedDocument(tok, [j]) for j, tok in enumerate(all_tok)]
-        model = _d2v.Doc2Vec(vector_size=40, min_count=1, epochs=60)
-        model.build_vocab(tagged)
-        model.train(tagged, total_examples=model.corpus_count, epochs=model.epochs)
+        sbert_en = _get_sbert_en()
+        en_origs = [orig_texts[i] for i in en_indices]
+        en_suggs = [sugg_texts[i] for i in en_indices]
+        embs_en = sbert_en.encode(en_origs + en_suggs, show_progress_bar=False)
         ne = len(en_indices)
         for k, idx in enumerate(en_indices):
-            v_orig = model.infer_vector(en_origs_tok[k]).reshape(1, -1)
-            v_sugg = model.infer_vector(en_suggs_tok[k]).reshape(1, -1)
-            sim = float(cosine_sim(v_orig, v_sugg)[0][0])
+            sim = float(cosine_sim([embs_en[k]], [embs_en[ne + k]])[0][0])
             sem_scores[idx] = round(max(0.0, sim), 4)
 
     def interpret(emb: float) -> str:

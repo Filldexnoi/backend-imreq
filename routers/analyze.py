@@ -331,6 +331,9 @@ async def analyze_with_progress(
         else:
             logger.info("WebSocket: Reference context: none (Necessary/Feasible/Correct → CANNOT_DETERMINE)")
 
+        enabled_criteria = project.enabled_criteria or None
+        logger.info(f"WebSocket: Enabled criteria: {enabled_criteria or 'all 9'}")
+
         # Get requirements
         origin_requirements = db.query(models.OriginRequirement)\
             .filter(models.OriginRequirement.project_id == project_id)\
@@ -372,6 +375,7 @@ async def analyze_with_progress(
             requirement_template,
             websocket=websocket,
             reference_context=reference_context,
+            enabled_criteria=enabled_criteria,
         )
 
         # Open a fresh DB session just for saving results (retry if DB is in recovery)

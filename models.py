@@ -31,6 +31,7 @@ class Project(Base):
     description = Column(Text, nullable=True)
     requirement_template = Column(String(50), nullable=True)  # EARS, IEEE830, Others
     reference_files = Column(JSON, nullable=True)
+    enabled_criteria = Column(JSON, nullable=True)  # List[str] | null = use all 9
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

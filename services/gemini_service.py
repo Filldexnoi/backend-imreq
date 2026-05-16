@@ -386,27 +386,34 @@ cited_rules must be a list of rule names from the reference above that apply to 
         req_id: str,
         requirement_template: str = "Others",
         reference_context: str = None,
+        enabled_criteria: list = None,
     ) -> Dict:
         """
-        Analyze ONE requirement against all 9 ISO 29148 criteria.
+        Analyze ONE requirement against selected ISO 29148 criteria.
         Each criterion is evaluated by a separate focused LLM call, all run in parallel.
+        If enabled_criteria is None or empty, all 9 criteria are used.
         """
+        active_criteria = (
+            [c for c in self.CRITERIA_NAMES if c in enabled_criteria]
+            if enabled_criteria else self.CRITERIA_NAMES
+        )
+
         criterion_results: Dict[str, Dict] = {}
 
-        with ThreadPoolExecutor(max_workers=9) as executor:
+        with ThreadPoolExecutor(max_workers=len(active_criteria)) as executor:
             futures = {
                 executor.submit(
                     self._analyze_single_criterion,
                     criterion, requirement, req_id, requirement_template, reference_context,
                 ): criterion
-                for criterion in self.CRITERIA_NAMES
+                for criterion in active_criteria
             }
             for future in as_completed(futures):
                 result = future.result()
                 criterion_results[result["criterion"]] = result
 
-        # Rebuild in canonical order
-        results_list = [criterion_results[c] for c in self.CRITERIA_NAMES if c in criterion_results]
+        # Rebuild in canonical order (only active criteria)
+        results_list = [criterion_results[c] for c in active_criteria if c in criterion_results]
 
         passed_criteria = []
         failed_evaluation = {}
@@ -431,9 +438,10 @@ cited_rules must be a list of rule names from the reference above that apply to 
                     "cited_rules": cited_rules,
                 }
 
+        total_criteria = len(active_criteria)
         return {
             "req_id": req_id,
-            "score": f"{total_score}/9",
+            "score": f"{total_score}/{total_criteria}",
             "characteristics": passed_criteria,
             "evaluation": failed_evaluation,
             "detailed_results": results_list,
@@ -445,11 +453,13 @@ cited_rules must be a list of rule names from the reference above that apply to 
         requirement_template: str = "Others",
         progress_callback=None,
         reference_context: str = None,
+        enabled_criteria: list = None,
     ) -> Dict:
         """
         Analyze requirements in parallel.
         reference_context: extracted text from project reference files,
         used as ground truth for Necessary, Feasible, and Correct criteria.
+        enabled_criteria: list of criterion names to evaluate; None = all 9.
         """
         total = len(requirements)
         results = []
@@ -466,6 +476,7 @@ cited_rules must be a list of rule names from the reference above that apply to 
                     req['req_id'],
                     requirement_template,
                     reference_context,
+                    enabled_criteria,
                 )
                 for req in requirements
             ]
@@ -557,6 +568,7 @@ cited_rules must be a list of rule names from the reference above that apply to 
         requirement_template: str = "Others",
         websocket=None,
         reference_context: str = None,
+        enabled_criteria: list = None,
     ):
         """
         Analyze with real-time progress updates via WebSocket
@@ -595,6 +607,7 @@ cited_rules must be a list of rule names from the reference above that apply to 
                 requirement_template,
                 progress_callback=progress_callback,
                 reference_context=reference_context,
+                enabled_criteria=enabled_criteria,
             )
         finally:
             heartbeat_stop.set()
