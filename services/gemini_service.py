@@ -7,6 +7,7 @@ import json
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from services.llm_provider import get_llm_provider, LLMProvider
+from services.similarity_utils import compute_semantic_similarity as _sem_sim
 
 logger = logging.getLogger(__name__)
 
@@ -628,6 +629,8 @@ cited_rules must be a list of rule names from the reference above that apply to 
         evaluation: Dict[str, str],
         module: str = None,
         requirement_template: str = "Others",
+        min_similarity: float = 0.5,
+        max_retries: int = 3,
     ) -> Dict:
         """
         Generate improved requirement based on failed criteria.
@@ -790,83 +793,112 @@ cited_rules per improvement: list rule names from the reference above that motiv
 description per improvement: explain what was changed and why it fixes the issue. Do NOT mention ISO section numbers (§5.2.x) or standard names in the description text.
 Output JSON only."""
         
-        try:
-            result_text = self.llm.generate_json(prompt)
+        best_result = None
+        best_sim = -1.0
 
-            # Extract JSON
-            if "```json" in result_text:
-                result_text = result_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in result_text:
-                result_text = result_text.split("```")[1].split("```")[0].strip()
+        for attempt in range(max_retries + 1):
+            retry_note = (
+                f"\n\nIMPORTANT (retry {attempt}/{max_retries}): The previous version had low semantic "
+                "similarity with the original requirement. Preserve the core meaning, domain terms, and "
+                "structure of the original as closely as possible while fixing only the failed criteria."
+            ) if attempt > 0 else ""
 
-            data = json.loads(result_text)
-            
-            # Filter improvements to only include criteria that actually failed
-            # Normalise: LLM may return plain string or {description, cited_rules} dict
-            all_improvements = data.get("improvements", {})
-            failed_criteria_only = {}
-            for criterion, improvement in all_improvements.items():
-                if criterion not in evaluation:
-                    continue
-                if isinstance(improvement, dict):
-                    failed_criteria_only[criterion] = {
-                        "description": improvement.get("description", ""),
-                        "cited_rules": improvement.get("cited_rules") or [],
-                    }
+            try:
+                result_text = self.llm.generate_json(prompt + retry_note)
+
+                if "```json" in result_text:
+                    result_text = result_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in result_text:
+                    result_text = result_text.split("```")[1].split("```")[0].strip()
+
+                data = json.loads(result_text)
+
+                all_improvements = data.get("improvements", {})
+                failed_criteria_only = {}
+                for criterion, improvement in all_improvements.items():
+                    if criterion not in evaluation:
+                        continue
+                    if isinstance(improvement, dict):
+                        failed_criteria_only[criterion] = {
+                            "description": improvement.get("description", ""),
+                            "cited_rules": improvement.get("cited_rules") or [],
+                        }
+                    else:
+                        failed_criteria_only[criterion] = {
+                            "description": str(improvement),
+                            "cited_rules": [],
+                        }
+
+                is_split = data.get("is_split", False)
+                split_requirements = data.get("split_requirements") or None
+                suggested_requirement = data.get("suggested_requirement") or ""
+
+                if not has_singular_failure and is_split:
+                    is_split = False
+                    if not suggested_requirement and split_requirements:
+                        suggested_requirement = split_requirements[0].get("requirement", "") or ""
+                    split_requirements = None
+
+                if is_split and (not split_requirements or len(split_requirements) < 2):
+                    is_split = False
+                    if split_requirements and len(split_requirements) == 1:
+                        suggested_requirement = split_requirements[0].get("requirement", "") or suggested_requirement
+                    split_requirements = None
+
+                # Compute semantic similarity to decide whether to retry
+                if is_split and split_requirements:
+                    suggested_text = ' '.join(s.get('requirement', '') for s in split_requirements)
                 else:
-                    # Fallback: plain string from older model response
-                    failed_criteria_only[criterion] = {
-                        "description": str(improvement),
-                        "cited_rules": [],
+                    suggested_text = suggested_requirement or ''
+
+                sim = _sem_sim(requirement, suggested_text) if suggested_text else 0.0
+
+                current_result = {
+                    "req_id": req_id,
+                    "is_split": is_split,
+                    "suggested_requirement": suggested_requirement if not is_split else None,
+                    "split_requirements": split_requirements if is_split else None,
+                    "improvements": failed_criteria_only,
+                    "explanation": data.get("explanation", ""),
+                    "success": True,
+                    "semantic_similarity": sim,
+                }
+
+                if best_result is None or sim > best_sim:
+                    best_sim = sim
+                    best_result = current_result
+
+                if sim >= min_similarity or not suggested_text:
+                    break
+
+                logger.info(
+                    f"[suggestion_retry] {req_id}: attempt {attempt + 1}/{max_retries + 1} "
+                    f"sem_sim={sim:.3f} < threshold {min_similarity}, retrying..."
+                )
+
+            except Exception as e:
+                logger.error(f"[suggestion_retry] {req_id}: attempt {attempt + 1} exception: {e}")
+                if best_result is None:
+                    best_result = {
+                        "req_id": req_id,
+                        "is_split": False,
+                        "suggested_requirement": "",
+                        "split_requirements": None,
+                        "improvements": {},
+                        "explanation": f"เกิดข้อผิดพลาด: {str(e)}",
+                        "success": False,
+                        "error": str(e)
                     }
+                break
 
-            # Check if requirement was split
-            is_split = data.get("is_split", False)
-            split_requirements = data.get("split_requirements") or None
-            suggested_requirement = data.get("suggested_requirement") or ""
-
-            # Server-side guard 1: if Singular passed, never allow split
-            if not has_singular_failure and is_split:
-                is_split = False
-                # Model wrongly returned splits — use first split as suggested_requirement fallback
-                if not suggested_requirement and split_requirements:
-                    suggested_requirement = split_requirements[0].get("requirement", "") or ""
-                split_requirements = None
-
-            # Server-side guard 2: split must produce at least 2 requirements
-            if is_split and (not split_requirements or len(split_requirements) < 2):
-                is_split = False
-                # Use the single split item's text as suggested_requirement fallback
-                if split_requirements and len(split_requirements) == 1:
-                    suggested_requirement = split_requirements[0].get("requirement", "") or suggested_requirement
-                split_requirements = None
-
-            return {
-                "req_id": req_id,
-                "is_split": is_split,
-                "suggested_requirement": suggested_requirement if not is_split else None,
-                "split_requirements": split_requirements if is_split else None,
-                "improvements": failed_criteria_only,
-                "explanation": data.get("explanation", ""),
-                "success": True
-            }
-            
-        except Exception as e:
-            return {
-                "req_id": req_id,
-                "is_split": False,
-                "suggested_requirement": "",
-                "split_requirements": None,
-                "improvements": {},
-                "explanation": f"เกิดข้อผิดพลาด: {str(e)}",
-                "success": False,
-                "error": str(e)
-            }
+        return best_result
     
     async def generate_suggestions_parallel(
         self,
         analyzed_requirements: List[Dict],
-        progress_callback=None
+        progress_callback=None,
+        min_similarity: float = 0.5,
+        max_retries: int = 3,
     ) -> Dict:
         """
         Generate suggestions for multiple requirements in parallel
@@ -913,7 +945,9 @@ Output JSON only."""
                     req['requirement'],
                     req.get('evaluation', {}),
                     req.get('module'),
-                    req.get('requirement_template', 'Others')
+                    req.get('requirement_template', 'Others'),
+                    min_similarity,
+                    max_retries,
                 )
                 for req in needs_improvement
             ]
@@ -945,17 +979,22 @@ Output JSON only."""
     
     def generate_suggestions_parallel_sync(
         self,
-        analyzed_requirements: List[Dict]
+        analyzed_requirements: List[Dict],
+        min_similarity: float = 0.5,
+        max_retries: int = 3,
     ) -> Dict:
-        """
-        Synchronous version for non-async contexts
-        """
-        return asyncio.run(self.generate_suggestions_parallel(analyzed_requirements))
+        return asyncio.run(self.generate_suggestions_parallel(
+            analyzed_requirements,
+            min_similarity=min_similarity,
+            max_retries=max_retries,
+        ))
     
     async def generate_suggestion_with_progress(
         self,
         analyzed_requirements: List[Dict],
-        websocket=None
+        websocket=None,
+        min_similarity: float = 0.5,
+        max_retries: int = 3,
     ):
         """
         Generate suggestions with real-time progress updates via WebSocket
@@ -977,7 +1016,9 @@ Output JSON only."""
 
         result = await self.generate_suggestions_parallel(
             analyzed_requirements,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            min_similarity=min_similarity,
+            max_retries=max_retries,
         )
 
         await safe_send({"type": "complete", "result": result})

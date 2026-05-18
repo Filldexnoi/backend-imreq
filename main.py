@@ -37,23 +37,7 @@ import re
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity as cosine_sim
 
-# Lazy-loaded SBERT models (loaded once on first use)
-_sbert_model = None
-_sbert_en_model = None
-
-def _get_sbert():
-    global _sbert_model
-    if _sbert_model is None:
-        from sentence_transformers import SentenceTransformer
-        _sbert_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-    return _sbert_model
-
-def _get_sbert_en():
-    global _sbert_en_model
-    if _sbert_en_model is None:
-        from sentence_transformers import SentenceTransformer
-        _sbert_en_model = SentenceTransformer('all-MiniLM-L6-v2')
-    return _sbert_en_model
+from services.similarity_utils import get_sbert as _get_sbert, get_sbert_en as _get_sbert_en
 
 def _is_thai(text: str) -> bool:
     return bool(re.search(r'[\u0e00-\u0e7f]', text or ''))

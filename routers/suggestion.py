@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session
 from typing import List
 from uuid import UUID
 import asyncio
 import logging
+import os
 
 from database import get_db, get_db_with_retry
 import models
@@ -14,6 +15,10 @@ router = APIRouter(prefix="/api/suggestions", tags=["suggestions"])
 
 # Initialize suggestion service
 suggestion_service = GeminiService(max_workers=10)
+
+# Defaults from env (can still be overridden per-request via query params)
+_DEFAULT_MIN_SIMILARITY = float(os.getenv("MIN_SIMILARITY", "0.5"))
+_DEFAULT_MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +57,8 @@ def filter_improvements_by_evaluation(
 @router.post("/projects/{project_id}/generate")
 async def generate_suggestions_for_project(
     project_id: UUID,
+    min_similarity: float = Query(default=_DEFAULT_MIN_SIMILARITY, ge=0.0, le=1.0),
+    max_retries: int = Query(default=_DEFAULT_MAX_RETRIES, ge=1, le=5),
     current_user: models.User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -91,7 +98,11 @@ async def generate_suggestions_for_project(
     
     try:
         # Generate suggestions in parallel
-        result = await suggestion_service.generate_suggestions_parallel(req_data)
+        result = await suggestion_service.generate_suggestions_parallel(
+            req_data,
+            min_similarity=min_similarity,
+            max_retries=max_retries,
+        )
         
         # Clear existing suggestions for this project
         deleted_count = db.query(models.SuggestedRequirement)\
@@ -156,6 +167,8 @@ async def generate_suggestions_for_project(
 async def generate_suggestion_for_single_requirement(
     project_id: UUID,
     req_id: str,
+    min_similarity: float = Query(default=_DEFAULT_MIN_SIMILARITY, ge=0.0, le=1.0),
+    max_retries: int = Query(default=_DEFAULT_MAX_RETRIES, ge=1, le=5),
     db: Session = Depends(get_db)
 ):
     """
@@ -198,7 +211,9 @@ async def generate_suggestion_for_single_requirement(
             requirement=analyzed_req.requirement,
             evaluation=analyzed_req.evaluation or {},
             module=analyzed_req.module,
-            requirement_template=project.requirement_template or "Others"
+            requirement_template=project.requirement_template or "Others",
+            min_similarity=min_similarity,
+            max_retries=max_retries,
         )
         
         if not result.get('success', False):
@@ -331,6 +346,8 @@ async def get_suggestion_for_requirement(
 async def generate_suggestions_with_progress(
     websocket: WebSocket,
     project_id: UUID,
+    min_similarity: float = Query(default=_DEFAULT_MIN_SIMILARITY, ge=0.0, le=1.0),
+    max_retries: int = Query(default=_DEFAULT_MAX_RETRIES, ge=1, le=5),
     db: Session = Depends(get_db)
 ):
     """
@@ -392,7 +409,9 @@ async def generate_suggestions_with_progress(
         # Generate suggestions with progress — no DB connection held here
         result = await suggestion_service.generate_suggestion_with_progress(
             req_data,
-            websocket=websocket
+            websocket=websocket,
+            min_similarity=min_similarity,
+            max_retries=max_retries,
         )
 
         # Open a fresh DB session just for saving results (retry if DB is in recovery)
