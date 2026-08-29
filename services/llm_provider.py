@@ -37,7 +37,7 @@ class OpenAIProvider(LLMProvider):
 
 
 class GeminiProvider(LLMProvider):
-    DEFAULT_MODEL = "gemini-3.1-pro-preview"
+    DEFAULT_MODEL = "gemini-3.5-flash"
 
     def __init__(self):
         from google import genai

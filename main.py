@@ -60,7 +60,7 @@ def _jaccard(x: list, y: list) -> float:
 from database import engine, get_db, Base
 import models
 import schemas
-from routers import analyze , suggestion  , export , auth
+from routers import analyze , suggestion  , export , auth , model_test
 from services.auth import get_current_active_user
 
 # Create database tables
@@ -133,6 +133,7 @@ app.include_router(analyze.router)
 app.include_router(suggestion.router)
 app.include_router(export.router)
 app.include_router(auth.router)
+app.include_router(model_test.router)
 
 # Root endpoint
 @app.get("/")
