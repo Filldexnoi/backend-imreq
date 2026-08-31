@@ -72,11 +72,9 @@ LLM_PROVIDER=openai
 
 # OpenAI (used when LLM_PROVIDER=openai)
 OPENAI_API_KEY=your-openai-api-key-here
-OPENAI_MODEL=gpt-4o-mini
 
 # Gemini (used when LLM_PROVIDER=gemini)
 GEMINI_API_KEY=your-gemini-api-key-here
-GEMINI_MODEL=gemini-2.0-flash
 
 # Suggestion quality control
 MIN_SIMILARITY=0.5
