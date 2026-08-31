@@ -1,512 +1,209 @@
-# ImReq API - Quick Setup Guide
+# ImReq API - Backend Setup Guide
 
-ระบบวิเคราะห์และปรับปรุง Software Requirements ตามมาตรฐาน ISO/IEC/IEEE 29148
+ระบบวิเคราะห์และปรับปรุง Software Requirements ตามมาตรฐาน ISO/IEC/IEEE 29148 (FastAPI + PostgreSQL)
 
-## 🚀 Quick Start (5 Minutes)
+## 🚀 Quick Start
 
 ### Prerequisites
-- Python 3.10+
-- Docker (for PostgreSQL database)
-- Gemini API Key ([Get here](https://ai.google.dev/))
+- Python 3.11 (see `runtime.txt`)
+- Docker + Docker Compose (for PostgreSQL)
+- An API key for either **OpenAI** or **Gemini** (whichever `LLM_PROVIDER` you choose)
 
 ---
 
 ## 📦 Installation Steps
 
-### 1. Clone Repository
+### 1. Go to the backend folder
 ```bash
-git clone <repository-url>
 cd backend-imreq
 ```
 
-### 2. Create Virtual Environment
+### 2. Create & activate a virtual environment
 ```bash
-# Create venv
 python -m venv venv
 
-# Activate
 # Windows:
 venv\Scripts\activate
 # macOS/Linux:
 source venv/bin/activate
 ```
 
-### 3. Install Dependencies
+### 3. Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-**If `requirements.txt` doesn't exist, install manually:**
+### 4. Start PostgreSQL with Docker Compose
 ```bash
-pip install fastapi uvicorn sqlalchemy psycopg2-binary python-multipart google-generativeai python-dotenv
-```
-
-### 4. Setup Database with Docker
-
-**Install Docker:**
-- Download from: https://www.docker.com/get-started
-
-**Option 1: Using docker-compose (Recommended)**
-```bash
-# Start database (will auto-run init.sql on first start)
 docker-compose up -d
+```
 
-# Check status
+This starts two containers (see `docker-compose.yml`):
+- **`rag-postgres`** — Postgres (pgvector image) on port `5433`, database `ragdb`. `init.sql` runs automatically the first time the container starts and creates all tables (`users`, `projects`, `origin_requirements`, `analyzed_requirements`, `suggested_requirements`, `selected_requirements`).
+- **`rag-pgadmin`** — pgAdmin UI on http://localhost:5050 (login: `admin@admin.com` / `admin`) for browsing the DB if you want a GUI.
+
+Check status / logs:
+```bash
 docker-compose ps
-
-# View logs
-docker-compose logs -f postgres
+docker-compose logs -f db
 ```
 
-**Schema is created automatically!** The `init.sql` file will run when the database starts for the first time.
-
-**Option 2: Using docker run + manual schema**
+Verify tables were created:
 ```bash
-# Start database
-docker run -d \
-  --name imreq-postgres \
-  -e POSTGRES_PASSWORD=password \
-  -e POSTGRES_DB=imreq \
-  -p 5433:5432 \
-  postgres:14
-
-# Wait a few seconds for database to start, then run schema
-docker exec -i imreq-postgres psql -U postgres -d imreq < init.sql
+docker exec -it rag-postgres psql -U postgres -d ragdb -c "\dt"
 ```
 
-**Verify database is running:**
+### 5. Configure environment variables
 ```bash
-docker ps
-# Should see imreq-postgres container running
-```
-
-**Verify tables are created:**
-```bash
-# Connect to database
-docker exec -it imreq-postgres psql -U postgres -d imreq
-
-# List tables
-\dt
-
-# Should see: projects, origin_requirements, analyzed_requirements, 
-#             suggested_requirements, selected_requirements
-
-# Exit
-\q
-```
-
-### 5. Configure Environment Variables
-
-**Copy `.env.example` to `.env`:**
-```bash
-# Windows (Command Prompt):
+# Windows (PowerShell):
 copy .env.example .env
-
-# Windows (PowerShell) / macOS / Linux:
+# macOS/Linux:
 cp .env.example .env
 ```
 
-**Edit `.env` file and add your Gemini API key:**
+Edit `.env`:
 ```env
-DATABASE_URL=postgresql://postgres:password@localhost:5433/imreq
+DATABASE_URL=postgresql://postgres:postgres@localhost:5433/ragdb
 SECRET_KEY=your-secret-key-here
 CORS_ORIGINS=http://localhost:5173,http://localhost:3000
-GEMINI_API_KEY=your_actual_gemini_api_key_here
+
+# LLM Provider: "openai" (default) or "gemini"
+LLM_PROVIDER=openai
+
+# OpenAI (used when LLM_PROVIDER=openai)
+OPENAI_API_KEY=your-openai-api-key-here
+OPENAI_MODEL=gpt-4o-mini
+
+# Gemini (used when LLM_PROVIDER=gemini)
+GEMINI_API_KEY=your-gemini-api-key-here
+GEMINI_MODEL=gemini-2.0-flash
+
+# Suggestion quality control
+MIN_SIMILARITY=0.5
+MAX_RETRIES=3
 ```
 
-**Get Gemini API Key:**
-1. Go to https://ai.google.dev/
-2. Click "Get API Key"
-3. Copy and paste into `.env` file
+Notes:
+- `DATABASE_URL` must match the Docker Compose credentials (`postgres`/`postgres`, port `5433`, db `ragdb`) unless you change `docker-compose.yml`.
+- `CORS_ORIGINS` should include the frontend's dev URL (`http://localhost:5173` for Vite) and/or its deployed URL.
+- You only need an API key for the provider you set in `LLM_PROVIDER`.
+- Get an OpenAI key at https://platform.openai.com/api-keys, a Gemini key at https://ai.google.dev/.
 
-### 6. Run Server
+### 6. Run the server
 ```bash
+python run.py
+# or
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 7. Verify Installation
-Open browser:
-- **API Docs**: http://localhost:8000/docs
+### 7. Verify installation
+- **API Docs (Swagger)**: http://localhost:8000/docs
 - **Health Check**: http://localhost:8000/
-
-Should see:
-```json
-{
-  "message": "Welcome to ImReq API with PostgreSQL - Now with Suggestions & Export!"
-}
-```
 
 ---
 
-## 📁 Required Project Structure
-
-Make sure you have these files/folders:
+## 📁 Project Structure
 ```
-imreq-api/
-├── main.py
-├── database.py
-├── models.py
-├── schemas.py
-├── init.sql                # Database schema (auto-runs with docker-compose)
-├── docker-compose.yml      # Docker configuration
-├── .env.example            # Environment template
-├── .env                    # Your config (create from .env.example)
-├── requirements.txt        # Python dependencies
+backend-imreq/
+├── main.py                 # FastAPI app, CORS, router registration
+├── database.py             # SQLAlchemy engine/session
+├── models.py                # ORM models
+├── schemas.py                # Pydantic schemas
+├── embedding.py
+├── init.sql                 # DB schema (auto-runs via docker-compose)
+├── docker-compose.yml        # Postgres (pgvector) + pgAdmin
+├── requirements.txt
+├── run.py                    # Dev entrypoint (uvicorn)
 ├── routers/
-│   ├── __init__.py
-│   ├── analyze.py
-│   ├── suggestions.py
-│   └── export.py
-└── services/
-    ├── __init__.py
-    ├── gemini_service.py
-    └── suggestion_service.py
-```
-
-**Create missing directories:**
-```bash
-mkdir -p routers services
-touch routers/__init__.py services/__init__.py
+│   ├── auth.py                # /api/auth
+│   ├── analyze.py              # /api/analyze-parallel
+│   ├── suggestion.py            # /api/suggestions
+│   ├── export.py                # /api/export
+│   └── model_test.py             # /api/model-test
+├── services/
+│   ├── auth.py                  # password hashing / JWT
+│   ├── llm_provider.py           # OpenAI/Gemini switch
+│   ├── gemini_service.py
+│   └── similarity_utils.py
+└── tests/
 ```
 
 ---
 
 ## 📊 Database Schema
 
-The database consists of 5 main tables (defined in `init.sql`):
+Defined in `init.sql`, all tables use UUID primary keys with `pgcrypto`:
 
-### 1. **projects**
-Stores project information
-- `id` (UUID, Primary Key)
-- `title` (VARCHAR) - Project name
-- `description` (TEXT) - Project description
-- `created_at`, `updated_at` (TIMESTAMP)
+| Table | Purpose |
+|---|---|
+| `users` | Auth accounts (email/username/hashed password) |
+| `projects` | Projects, owned by a `user_id`, with optional `requirement_template` / `reference_files` |
+| `origin_requirements` | Requirements uploaded by users |
+| `analyzed_requirements` | ISO 29148 evaluation results (`score`, `characteristics`, `evaluation`) |
+| `suggested_requirements` | AI-generated improved requirements (supports splitting via `is_split`/`split_requirements`) |
+| `selected_requirements` | User's final chosen requirements |
 
-### 2. **origin_requirements**
-Original requirements uploaded by users
-- `id` (UUID, Primary Key)
-- `req_id` (VARCHAR) - Requirement identifier
-- `project_id` (UUID) → References projects
-- `module` (VARCHAR) - Module/category name
-- `requirement` (TEXT) - Requirement text
-- Indexed on: `req_id`, `project_id`
-
-### 3. **analyzed_requirements**
-Analysis results from ISO 29148 evaluation
-- `id` (UUID, Primary Key)
-- `req_id` (VARCHAR)
-- `project_id` (UUID) → References projects
-- `module` (VARCHAR)
-- `score` (VARCHAR) - e.g., "7/9"
-- `characteristics` (JSONB) - Array of passed criteria
-- `requirement` (TEXT)
-- `evaluation` (JSONB) - Failed criteria with reasons
-- Indexed on: `req_id`, `project_id`
-
-### 4. **suggested_requirements**
-AI-generated improvement suggestions
-- `id` (UUID, Primary Key)
-- `req_id` (VARCHAR)
-- `project_id` (UUID) → References projects
-- `module` (VARCHAR)
-- `original_requirement` (TEXT)
-- `suggested_requirement` (TEXT) - Improved version
-- `original_score` (VARCHAR)
-- `improvements` (JSONB) - What was fixed per criterion
-- Indexed on: `req_id`, `project_id`
-
-### 5. **selected_requirements**
-User-selected final requirements
-- `id` (UUID, Primary Key)
-- `req_id` (VARCHAR)
-- `project_id` (UUID) → References projects
-- `module` (VARCHAR)
-- `requirement` (TEXT)
-- Indexed on: `req_id`, `project_id`
-
-**Schema Features:**
-- ✅ All tables use UUID primary keys
-- ✅ Foreign keys with `ON DELETE CASCADE`
-- ✅ Indexes for fast lookups
-- ✅ `pgcrypto` extension for UUID generation
-- ✅ JSONB for flexible data storage
-
----
-
-## 🎯 Basic Usage Flow
-
-```bash
-# 1. Create Project
-curl -X POST http://localhost:8000/api/projects \
-  -H "Content-Type: application/json" \
-  -d '{"title":"My Project","description":"Test"}'
-
-# Response: {"id":"<project-id>"}
-
-# 2. Upload Requirements CSV
-curl -X POST http://localhost:8000/api/projects/<project-id>/originrequirements \
-  -F "file=@requirements.csv" \
-  -F 'mapping={"req_id":"ID","module":"Module","requirement":"Requirement"}'
-
-# 3. Analyze Requirements
-curl -X POST http://localhost:8000/api/analyze-parallel/projects/<project-id>/requirements
-
-# 4. Generate Suggestions
-curl -X POST http://localhost:8000/api/suggestions/projects/<project-id>/generate
-
-# 5. Export Results
-curl -o report.csv \
-  http://localhost:8000/api/export/projects/<project-id>/comparison/csv
-```
-
----
-
-## 🛠️ Troubleshooting
-
-### Database Connection Error
-
-**Using docker-compose:**
-```bash
-# Check status
-docker-compose ps
-
-# Start database
-docker-compose up -d
-
-# View logs
-docker-compose logs postgres
-
-# Restart
-docker-compose restart postgres
-
-# Stop and remove (data will be preserved in volume)
-docker-compose down
-
-# Stop and remove including data
-docker-compose down -v
-```
-
-**Using docker run:**
-```bash
-# Check if Docker container is running
-docker ps
-
-# If not running, start it
-docker start imreq-postgres
-
-# Check container logs
-docker logs imreq-postgres
-
-# Restart container if needed
-docker restart imreq-postgres
-```
-
-### Stop/Remove Database Container
-
-**Using docker-compose:**
-```bash
-# Stop (data preserved)
-docker-compose stop
-
-# Stop and remove (data preserved in volume)
-docker-compose down
-
-# Stop, remove, and delete all data
-docker-compose down -v
-
-# Recreate fresh database (schema will auto-run)
-docker-compose down -v
-docker-compose up -d
-```
-
-**Using docker run:**
-```bash
-# Stop container
-docker stop imreq-postgres
-
-# Remove container (data will be lost)
-docker rm imreq-postgres
-
-# Remove and recreate fresh database
-docker rm -f imreq-postgres
-docker run -d \
-  --name imreq-postgres \
-  -e POSTGRES_PASSWORD=password \
-  -e POSTGRES_DB=imreq \
-  -p 5433:5432 \
-  postgres:14
-
-# Run schema
-docker exec -i imreq-postgres psql -U postgres -d imreq < init.sql
-```
-
-### Manually Run Schema (if needed)
-
-If tables are not created or you need to reset:
-
-```bash
-# Run init.sql
-docker exec -i imreq-postgres psql -U postgres -d imreq < init.sql
-
-# Or connect and paste SQL manually
-docker exec -it imreq-postgres psql -U postgres -d imreq
-# Then paste contents of init.sql
-```
-
-### Port Already in Use
-```bash
-# Use different port
-uvicorn main:app --reload --port 8001
-
-# Or kill process
-# Windows:
-netstat -ano | findstr :8000
-taskkill /PID <PID> /F
-
-# macOS/Linux:
-lsof -ti:8000 | xargs kill -9
-```
-
-### Module Not Found
-```bash
-# Make sure venv is activated
-source venv/bin/activate  # macOS/Linux
-venv\Scripts\activate     # Windows
-
-# Reinstall dependencies
-pip install -r requirements.txt
-```
-
-### API Key Error
-```bash
-# Check .env file exists and has correct key
-cat .env
-
-# Or set directly in terminal
-export GEMINI_API_KEY=your_actual_key
-```
-
----
-
-## 📊 CSV Format for Upload
-
-**requirements.csv example:**
-```csv
-req_id,module,requirement
-REQ-001,Authentication,ระบบต้องสามารถ login ได้
-REQ-002,Payment,ระบบต้องรองรับการชำระเงิน
-REQ-003,Reporting,ระบบต้องสร้างรายงาน
-```
-
----
-
-## 🔑 Get Gemini API Key
-
-1. Go to https://ai.google.dev/
-2. Click "Get API Key"
-3. Create/select Google Cloud project
-4. Generate API key
-5. Copy to `.env` file
+All child tables reference `projects` (and `projects` references `users`) with `ON DELETE CASCADE`.
 
 ---
 
 ## 📝 Key Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/projects` | GET | List projects |
-| `/api/projects` | POST | Create project |
-| `/api/projects/{project_id}/originrequirements` | POST | Create Origin Requirement |
-| `/api/projects/{project_id}/originrequirements` | GET | Get Origin Requirement |
-| `/api/analyze-parallel/projects/{project_id}/requirements` | POST | Create Analyze Requirement |
-| `/api/analyze-parallel/projects/{project_id}/requirements` | GET | Get Analyze Requirement |
-| `/api/suggestions/projects/{project_id}/requirements` | POST | Create Suggest Requirement |
-| `/api/suggestions/projects/{project_id}/requirements` | GET | GET Suggest Requirement |
-| `/api/export/projects/{project_id}/selectedrequirements/csv` | GET | Export Selected Requirement |
-| `/docs` | GET | API Documentation |
+| Endpoint prefix | Router | Description |
+|---|---|---|
+| `/api/auth` | `auth.py` | Register / login (JWT) |
+| `/api/projects` | `main.py` | CRUD for projects & origin requirements |
+| `/api/analyze-parallel` | `analyze.py` | Run ISO 29148 analysis on requirements |
+| `/api/suggestions` | `suggestion.py` | Generate & fetch AI suggestions |
+| `/api/export` | `export.py` | Export results/comparison as CSV |
+| `/api/model-test` | `model_test.py` | Ad-hoc LLM/model testing |
+| `/docs` | — | Swagger UI |
 
 ---
 
-## 🎉 Quick Start Summary
+## 🛠️ Troubleshooting
 
+### Database connection error
 ```bash
-# 1. Clone repository
-git clone <repository-url>
-cd imreq-api
+docker-compose ps
+docker-compose logs db
+docker-compose restart db
+```
 
-# 2. Setup Python environment
-python -m venv venv
-source venv/bin/activate  # or venv\Scripts\activate on Windows
+### Reset the database (drops all data)
+```bash
+docker-compose down -v
+docker-compose up -d   # init.sql re-runs on fresh volume
+```
+
+### Port already in use
+```bash
+uvicorn main:app --reload --port 8001
+
+# Windows:
+netstat -ano | findstr :8000
+taskkill /PID <PID> /F
+# macOS/Linux:
+lsof -ti:8000 | xargs kill -9
+```
+
+### Module not found
+```bash
+# Make sure venv is activated, then:
 pip install -r requirements.txt
-
-# 3. Start PostgreSQL with Docker Compose
-docker-compose up -d
-# Schema (init.sql) runs automatically on first start!
-
-# 4. Configure environment
-cp .env.example .env
-# Edit .env and add your GEMINI_API_KEY
-
-# 5. Run server
-uvicorn main:app --reload
-
-# 6. Done! Open browser
-# http://localhost:8000/docs
 ```
 
-**Alternative (without docker-compose):**
-```bash
-# Step 3 alternative:
-docker run -d \
-  --name imreq-postgres \
-  -e POSTGRES_PASSWORD=password \
-  -e POSTGRES_DB=imreq \
-  -p 5433:5432 \
-  postgres:14
-
-# Run schema manually
-docker exec -i imreq-postgres psql -U postgres -d imreq < init.sql
-```
-
-Server running at: **http://localhost:8000**
-
-API Documentation: **http://localhost:8000/docs**
+### LLM/API key error
+Check that `LLM_PROVIDER` in `.env` matches the key you filled in (`OPENAI_API_KEY` or `GEMINI_API_KEY`).
 
 ---
 
-## 💡 Quick Commands Reference
-
+## 🧪 Running Tests
 ```bash
-# Database (Docker Compose) - Recommended
-docker-compose up -d            # Start database
-docker-compose down             # Stop database (keep data)
-docker-compose down -v          # Stop and delete data
-docker-compose ps               # Check status
-docker-compose logs postgres    # View logs
-
-# Database (Docker)
-docker ps                       # Check if database is running
-docker start imreq-postgres     # Start database
-docker stop imreq-postgres      # Stop database
-docker logs imreq-postgres      # View database logs
-
-# Python Environment
-source venv/bin/activate        # Activate venv (macOS/Linux)
-venv\Scripts\activate           # Activate venv (Windows)
-
-# Run server
-uvicorn main:app --reload                              # Development
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4  # Production
-
-# Database access (optional)
-docker exec -it imreq-postgres psql -U postgres -d imreq
-
-# View API docs
-open http://localhost:8000/docs  # macOS
-start http://localhost:8000/docs # Windows
+pytest
 ```
+(config in `pytest.ini`; coverage output goes to `htmlcov/`)
 
 ---
 
-**Version**: 1.0.0  
-**Status**: Ready to Use ✅
+**Runtime**: Python 3.11.9 (see `runtime.txt`) · Deployable to Vercel (see `.vercelignore`)
